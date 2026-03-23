@@ -1,0 +1,19 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Environment
+venv/
+.env
+
+# Data (Never upload raw images or large weights)
+data/raw/*
+data/synthetic/*
+data/ground_truth/*
+!data/raw/.gitkeep
+!data/synthetic/.gitkeep
+
+# Model weights
+*.pth
+*.onnx
+*.tflite
