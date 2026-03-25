@@ -7,6 +7,7 @@ input_folder = r"F:\final_invoices_dataset\final_invoices_dataset"
 
 # Output path
 output_folder = r"Datasets\split_dataset"
+output_folder_1 = os.path.join(input_folder, "fake_dataset_split")
 
 train_dir = os.path.join(output_folder, "train")
 val_dir = os.path.join(output_folder, "val")
