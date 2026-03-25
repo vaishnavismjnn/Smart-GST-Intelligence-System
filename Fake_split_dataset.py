@@ -13,8 +13,12 @@ train_dir = os.path.join(output_folder, "train")
 val_dir = os.path.join(output_folder, "val")
 test_dir = os.path.join(output_folder, "test")
 
+train_dir1 = os.path.join(output_folder1, "train")
+val_dir1 = os.path.join(output_folder1, "val")
+test_dir1 = os.path.join(output_folder1, "test")
+
 # Create folders
-for folder in [train_dir, val_dir, test_dir]:
+for folder in [train_dir, val_dir, test_dir, train_dir1, val_dir1, test_dir1]:
     os.makedirs(folder, exist_ok=True)
 
 # Get all image files
@@ -38,16 +42,17 @@ val_files = images[train_split:val_split]
 test_files = images[val_split:]
 
 # Copy function
-def copy_files(files, destination):
+def copy_files(files, dest1, dest2):
     for file in files:
         src = os.path.join(input_folder, file)
-        dst = os.path.join(destination, file)
-        shutil.copy(src, dst)
+        
+        shutil.copy(src, os.path.join(dest1, file))  # GitHub
+        shutil.copy(src, os.path.join(dest2, file))  # F drive
 
 # Copy data
-copy_files(train_files, train_dir)
-copy_files(val_files, val_dir)
-copy_files(test_files, test_dir)
+copy_files(train_files, train_dir, train_dir1)
+copy_files(val_files, val_dir, val_dir1)
+copy_files(test_files, test_dir, test_dir1)
 
 print("Dataset split completed!")
 print("Train:", len(train_files))
