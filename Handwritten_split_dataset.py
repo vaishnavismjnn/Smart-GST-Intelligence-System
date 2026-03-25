@@ -7,7 +7,7 @@ input_folder = r"F:\Handwritten_datasets"
 
 # Output folder
 output_folder = os.path.join(input_folder, "dataset_split")
-
+output_folder = r"Datasets\Handwritten_split_dataset"
 train_ratio = 0.7
 val_ratio = 0.15
 test_ratio = 0.15
