@@ -1,7 +1,7 @@
 import cv2
 import os
 
-input_folder = r"F:\Handwritten_datasets"
+input_folder = r"F:\SplitedDatasets\Handwritten_split_dataset"
 output_folder = r"F:\Handwritten_processed"
 
 os.makedirs(output_folder, exist_ok=True)
