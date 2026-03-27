@@ -12,7 +12,8 @@ data/synthetic/*
 data/ground_truth/*
 !data/raw/.gitkeep
 !data/synthetic/.gitkeep
-
+# Ignore datasets folder
+Datasets/
 # Model weights
 *.pth
 *.onnx
