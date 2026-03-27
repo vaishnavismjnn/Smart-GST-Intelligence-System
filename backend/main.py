@@ -4,9 +4,7 @@ import time
 
 app = FastAPI()
 
-# -----------------------------
 # Extract data from text
-# -----------------------------
 def structure_data(text):
     invoice = re.search(r'Invoice No[:\s]*(\w+)', text)
     gst = re.search(r'GSTIN[:\s]*([A-Z0-9]+)', text)
@@ -18,18 +16,16 @@ def structure_data(text):
         "total_amount": int(total.group(1)) if total else None
     }
 
-# -----------------------------
 # GST validation
-# -----------------------------
+
 def validate_gst(gst):
     if not gst:
         return False
     pattern = r'\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}[Z]{1}[A-Z\d]{1}'
     return bool(re.match(pattern, gst))
 
-# -----------------------------
 # API endpoint
-# -----------------------------
+
 @app.get("/")
 def home():
     return {"message": "Backend API running"}
