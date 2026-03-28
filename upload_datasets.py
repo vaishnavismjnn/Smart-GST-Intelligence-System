@@ -1,8 +1,12 @@
 from pymongo import MongoClient
+from dotenv import load_dotenv
 import os
 
-# 🔴 PASTE YOUR CONNECTION STRING HERE
-client = MongoClient("mongodb+srv://shanthalamn63_db:Shanthala123@newcluster.pknmchg.mongodb.net/?retryWrites=true&w=majority&appName=NewCluster")
+# Load environment variables from .env file
+load_dotenv()
+
+# Secure connection - no hardcoded passwords!
+client = MongoClient(os.getenv("MONGO_URI"))
 
 db = client["invoice_db"]
 collection = db["invoices"]
@@ -22,12 +26,10 @@ def upload_images():
                     "filename": file,
                     "path": file_path,
                     "source_folder": root,
-                    
                 }
 
                 collection.insert_one(doc)
                 print(f"Uploaded: {file}")
 
 upload_images()
-
 print("✅ ALL DATA UPLOADED SUCCESSFULLY")
