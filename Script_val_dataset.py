@@ -1,9 +1,9 @@
 import shutil
 from pathlib import Path
 
-JSON_DIR = Path(r"F:\layout_json_output\processed_fake_dataset\train")
-IMG_DIR  = Path(r"F:\Dataset processed\processed_fake_dataset\train")
-OUT_DIR  = Path(r"F:\Script\train")
+JSON_DIR = Path(r"F:\layout_json_output\processed_fake_dataset\val")
+IMG_DIR  = Path(r"F:\Dataset processed\processed_fake_dataset\val")
+OUT_DIR  = Path(r"F:\Script\val")
 
 for json_file in JSON_DIR.rglob("*.json"):
     name = json_file.stem
@@ -30,4 +30,4 @@ for json_file in JSON_DIR.rglob("*.json"):
     shutil.copy(img, img_dst)
     shutil.copy(json_file, json_dst)
 
-print(" Train dataset prepared")
+print(" Val dataset prepared")
