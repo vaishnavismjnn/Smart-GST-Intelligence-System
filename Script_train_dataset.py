@@ -1,33 +1,47 @@
 import shutil
 from pathlib import Path
 
-JSON_DIR = Path(r"F:\layout_json_output\processed_fake_dataset\train")
-IMG_DIR  = Path(r"F:\Dataset processed\processed_fake_dataset\train")
-OUT_DIR  = Path(r"F:\Script\train")
+IMG_ROOT  = Path(r"F:\Printed_Images")
+JSON_ROOT = Path(r"F:\layout_json_output")
+OUT_ROOT  = Path(r"F:\TScript")
 
-for json_file in JSON_DIR.rglob("*.json"):
-    name = json_file.stem
+splits = ["train", "val", "test"]
 
-    # find corresponding image
-    img = None
-    for ext in [".png", ".jpg", ".jpeg"]:
-        p = IMG_DIR / (name + ext)
-        if p.exists():
-            img = p
-            break
+for split in splits:
+    print(f"\n Processing {split}...")
 
-    if not img:
-        print(f" Missing image for {name}")
-        continue
+    for dataset in ["processed_fake_dataset", "processed_invoices", "SROIE_PROCESS"]:
+        
+        json_dir = JSON_ROOT / dataset / split
+        img_dir  = IMG_ROOT  / dataset / split
 
-    # destination paths
-    img_dst  = OUT_DIR / "images" / img.name
-    json_dst = OUT_DIR / "annotations" / json_file.name
+        if not json_dir.exists() or not img_dir.exists():
+            print(f" Missing {dataset}/{split}")
+            continue
 
-    img_dst.parent.mkdir(parents=True, exist_ok=True)
-    json_dst.parent.mkdir(parents=True, exist_ok=True)
+        for json_file in json_dir.rglob("*.json"):
+            name = json_file.stem
 
-    shutil.copy(img, img_dst)
-    shutil.copy(json_file, json_dst)
+            # find image
+            img = None
+            for ext in [".png", ".jpg", ".jpeg"]:
+                matches = list(img_dir.rglob(name + ext))
+                if matches:
+                    img = matches[0]
+                    break
 
-print(" Train dataset prepared")
+            if not img:
+                print(f" Missing image for {name}")
+                continue
+
+            # destination
+            img_dst  = OUT_ROOT / split / "images" / img.name
+            json_dst = OUT_ROOT / split / "annotations" / json_file.name
+
+            img_dst.parent.mkdir(parents=True, exist_ok=True)
+            json_dst.parent.mkdir(parents=True, exist_ok=True)
+
+            shutil.copy(img, img_dst)
+            shutil.copy(json_file, json_dst)
+
+print("\n Dataset prepared correctly")
