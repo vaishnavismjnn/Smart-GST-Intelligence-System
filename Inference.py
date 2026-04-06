@@ -1,9 +1,6 @@
 import pytesseract
 from PIL import Image
 import re
-import os
-
-from model import load_model, load_processor
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -31,6 +28,13 @@ def flat(text):
 # GSTIN
 # ─────────────────────────────────────────
 def extract_gstin(line_text):
+    """
+    Use the line-preserving text so OCR-split tokens are on the same line.
+    Standard: 2d + 5A + 4d + A + AN + Z + AN  (15 chars)
+    Relaxed  : any 15-char block starting with 2 digits (catches invoice_95's
+               non-standard 36LOWJT1390F1Z5 where tesseract reads Z correctly
+               in line-mode but not in word-join mode).
+    """
     f = flat(line_text)
 
     standard = re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b', f, re.IGNORECASE)
@@ -49,17 +53,26 @@ def extract_gstin(line_text):
 # INVOICE NUMBER
 # ─────────────────────────────────────────
 def extract_invoice_number(f):
+    """
+    Structured formats (INV/…, AAP/…) matched first.
+    Labeled plain number: allow . / : / - / spaces as separator.
+    Bill# OCR bleed fix: 'Bill# 21008' → real value is 4-digit '1008';
+      if matched digit string is 5 chars and label was Bill#, strip leading digit.
+    """
+    # Structured
     m = re.search(r'\b(?:INV|AAP|[A-Z]{2,5})[\/\-]\d{4}[-\/]\d{2,4}[\/\-]\d+', f, re.IGNORECASE)
     if m:
         return m.group()
 
+    # Bill# — separate pattern to apply the 5-digit strip fix
     m = re.search(r'Bill\s*#\s*(\d{4,5})', f, re.IGNORECASE)
     if m:
         val = m.group(1)
-        if len(val) == 5:
+        if len(val) == 5:          # OCR bled one digit from label → strip it
             val = val[1:]
         return val
 
+    # Labeled plain number — separator: colon, dash, period, or spaces
     m = re.search(
         r'(?:Invoice\s*No\.?|Inv\s*No\.?|Invoice\s*Number)'
         r'\s*[:\-\.\s]\s*(\d{3,6})',
@@ -75,6 +88,7 @@ def extract_invoice_number(f):
 # DATE
 # ─────────────────────────────────────────
 def extract_date(f):
+    """Labeled line first; bare date as fallback (validates day≤31, month≤12)."""
     m = re.search(
         r'(?:Invoice\s*Date|Bill\s*Date|Date\s*:)[^\d]{0,5}(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
         f, re.IGNORECASE
@@ -93,6 +107,19 @@ def extract_date(f):
 # MERCHANT
 # ─────────────────────────────────────────
 def extract_merchant(line_text, words):
+    """
+    Reads OCR lines top-down.
+
+    Fix extra_014: line is 'AHMEDABAD HARDWARE Name: Kamesh Mahawar'
+      → split on known person-label tokens ('Name:', 'Phone:', etc.) and
+        take only the LEFT part.
+
+    Fix synth_027: line is 'ANAND AUTO PARTS & SERVICES TAX INVOICE AAP/…'
+      → strip everything from first noise token ('TAX', 'INVOICE') onward.
+
+    Fix synth_034: line is 'For CloudPrint Media Solutions'
+      → strip leading filler words ('For', 'By', 'From').
+    """
     noise_triggers  = {"tax", "invoice", "receipt", "bill", "gstin", "gst",
                        "date", "no", "number", "total", "amount"}
     person_labels   = {"name", "phone", "email", "contact", "mob", "mobile"}
@@ -105,17 +132,20 @@ def extract_merchant(line_text, words):
     lines = [l.strip().lstrip("'\"`\u2018\u2019") for l in line_text.split('\n') if l.strip()]
 
     def clean_line(line):
+        """Return business-name portion of a line, or None."""
         noise_triggers_local = {"tax", "invoice", "receipt", "bill", "gstin", "gst",
                                  "date", "no", "number", "total", "amount", "services"}
         tokens = line.split()
         if not tokens:
             return None
 
+        # Strip leading fillers ('For CloudPrint…' → 'CloudPrint…')
         while tokens and tokens[0].lower().rstrip('.:,') in leading_fillers:
             tokens = tokens[1:]
         if not tokens:
             return None
 
+        # Split on person-label tokens ('Name: Kamesh' → keep only left side)
         result = []
         for t in tokens:
             if t.lower().rstrip('.:,') in person_labels:
@@ -125,9 +155,11 @@ def extract_merchant(line_text, words):
         if not tokens:
             return None
 
+        # Strip trailing noise; handle '&' smartly
         clean = []
         for i, t in enumerate(tokens):
             if t == '&':
+                # Stop if next token is a generic/noise word like 'SERVICES', 'GROUP'
                 next_t = tokens[i+1].lower() if i + 1 < len(tokens) else ''
                 if next_t in noise_triggers_local or next_t in {'group', 'associates', 'co'}:
                     break
@@ -138,9 +170,11 @@ def extract_merchant(line_text, words):
             if re.search(r'\d', t):
                 break
             clean.append(t)
+        # Strip trailing punctuation/ampersand
         name = " ".join(clean[:6]).rstrip('& ').strip()
         return name if name else None
 
+    # Pass 1: purely alphabetic lines (no digits on the line at all)
     for line in lines[:20]:
         if any(ch.isdigit() for ch in line):
             continue
@@ -148,16 +182,20 @@ def extract_merchant(line_text, words):
         if result and len(result) > 3:
             return result
 
+    # Pass 2: lines containing a biz keyword (allows digits elsewhere on line)
     for line in lines[:20]:
         low_set = {t.lower().strip('.:,&—–-') for t in line.split()}
         if not (low_set & biz_kw):
             continue
+        # For lines like 'CloudPrint Media Solutions GSTIN — 27AABCC...'
+        # truncate at 'GSTIN' keyword before passing to clean_line
         gstin_idx = re.search(r'\bGSTIN\b', line, re.IGNORECASE)
         trimmed = line[:gstin_idx.start()].strip() if gstin_idx else line
         result = clean_line(trimmed)
         if result and len(result) > 3:
             return result
 
+    # Fallback: top-word scan
     noise = {"invoice","proforma","tax","bill","date","due","gst","gstin",
              "total","amount","cgst","sgst","igst","no","number","ref",
              "order","challan","transport","phone","email","name","original",
@@ -176,12 +214,20 @@ def extract_merchant(line_text, words):
 # TOTAL AMOUNT
 # ─────────────────────────────────────────
 def extract_total(f):
+    """
+    Priority order — most specific label wins.
+    Uses LAST match (grand total is always the last line).
+    synth_016: Grand Total wins over per-item totals.
+    synth_034: 'Total amount (in words)' line comes before the real Total Amount line;
+               pattern guards against 'in words' context.
+    """
     patterns = [
         r'Total\s*Amount\s*After\s*Tax[^\d]{0,15}([\d,]+\.\d{2})',
         r'NET\s*PAYABLE[^\d]{0,15}([\d,]+\.\d{2})',
         r'Balance\s*Due[^\d]{0,15}([\d,]+\.\d{2})',
         r'Gross\s*Total[^\d]{0,10}([\d,]+\.\d{2})',
         r'Grand\s*Total[^\d]{0,10}([\d,]+\.\d{2})',
+        # "Total Amount 181,450.35" but NOT "Total amount (in words)"
         r'Total\s*[Aa]mount(?!\s*\(in\s*words\))(?!\s*After)(?!\s*\(GST\))[^\d]{0,10}([\d,]+\.\d{2})',
         r'\bTOTAL\b[^\d]{0,5}([\d,]+\.\d{2})',
     ]
@@ -196,9 +242,14 @@ def extract_total(f):
 # TAXABLE AMOUNT
 # ─────────────────────────────────────────
 def extract_taxable(f):
+    """
+    Uses FIRST match (subtotal always appears before grand total).
+    synth_016: 'Total Amount: 40,921.50' followed by 'Taxes (GST)' within 300 chars.
+    """
     patterns = [
         r'Taxable\s*Amount[^\d]{0,10}([\d,]+\.\d{2})',
         r'Sub\s*Total[^\d]{0,10}(?:Rs\.?)?\s*([\d,]+\.\d{2})',
+        # Proforma style (synth_016)
         r'Total\s*Amount[^\d]{0,10}([\d,]+\.\d{2})(?=.{0,300}Taxes\s*\(GST\))',
     ]
     for pat in patterns:
@@ -212,9 +263,16 @@ def extract_taxable(f):
 # GST AMOUNT
 # ─────────────────────────────────────────
 def extract_gst(f):
+    """
+    Priority:
+    1. IGST labeled summary  (max value across all IGST matches — avoids row-level amounts)
+    2. CGST + SGST labeled amounts
+    3. Labeled total-tax line  (Total Tax / Taxes (GST))
+    """
     total_gst = 0.0
     found = False
 
+    # 1 — IGST summary line
     igst_vals = re.findall(
         r'\bIGST\b\s*(?:@\s*\d+%?|[\(\d%\)]+)?\s*[:\s]+(?:Rs\.?)?\s*([\d,]+\.\d{2})',
         f, re.IGNORECASE
@@ -223,12 +281,14 @@ def extract_gst(f):
         total_gst += max(float(v.replace(",", "")) for v in igst_vals)
         found = True
 
+    # 2 — CGST + SGST
     cgst = re.findall(r'(?:Add\s*[:\-]?\s*)?CGST\b[^\d%]{0,10}([\d,]+\.\d{2})', f, re.IGNORECASE)
     sgst = re.findall(r'(?:Add\s*[:\-]?\s*)?SGST\b[^\d%]{0,10}([\d,]+\.\d{2})', f, re.IGNORECASE)
     if cgst and sgst and not found:
         total_gst += float(cgst[-1].replace(",", "")) + float(sgst[-1].replace(",", ""))
         found = True
 
+    # 3 — Labeled total tax
     if not found:
         tl = re.findall(
             r'(?:Total\s*Tax|Taxes\s*\(GST\)|Tax\s*Amount)[^\d]{0,10}([\d,]+\.\d{2})',
@@ -246,13 +306,13 @@ def extract_gst(f):
 # ─────────────────────────────────────────
 def extract_invoice(image_path):
     image     = Image.open(image_path).convert("RGB")
-    line_text = ocr_lines(image)
-    words     = ocr_words(image)
-    f         = flat(line_text)
+    line_text = ocr_lines(image)           # line-order text  ← used for ALL regex
+    words     = ocr_words(image)           # word list        ← merchant fallback only
+    f         = flat(line_text)            # whitespace-collapsed single string
 
     result = {}
 
-    gstin = extract_gstin(line_text)
+    gstin = extract_gstin(line_text)       # pass line_text so Z isn't mangled
     if gstin:
         result["GSTIN"] = gstin
 
@@ -272,6 +332,7 @@ def extract_invoice(image_path):
     taxable = extract_taxable(f)
     gst     = extract_gst(f)
 
+    # Sanity: taxable must be < total
     if total is not None and taxable is not None and taxable >= total:
         taxable = None
 
@@ -289,12 +350,15 @@ def extract_invoice(image_path):
 # RUN
 # ─────────────────────────────────────────
 if __name__ == "__main__":
+    import os
+
     image_paths = [
         r"F:\newdataset\images\extra_017_fmt9.png",
         r"F:\newdataset\images\synth_001_fmt1.png",
         r"F:\newdataset\images\synth_015_fmt2.png",
         r"F:\newdataset\images\synth_021_fmt3.png",
         r"F:\newdataset\images\invoice_16.png",
+    
     ]
 
     fields = [
