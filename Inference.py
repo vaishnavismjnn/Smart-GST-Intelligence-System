@@ -1,533 +1,324 @@
-import os
-import re
-import json
-import cv2
-import torch
-import numpy as np
 import pytesseract
-from pathlib import Path
 from PIL import Image
-from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
+import re
+import os
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-CONFIG = {
-    "model_dir": r"/content/drive/MyDrive/model",
-    "tesseract_cmd": r"/usr/bin/tesseract",
-    "min_ocr_conf": 30,
-    "device": "cuda" if torch.cuda.is_available() else "cpu",
-    "max_seq_length": 512,
-}
+from model import load_model, load_processor
 
-# GSTIN regex (Indian format)
-GSTIN_RE = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z]{1}[A-Z\d]{1}Z[A-Z\d]{1}$", re.IGNORECASE)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# ============================================================
-# HELPER: Convert NumPy types to Python native for JSON
-# ============================================================
-def convert_to_serializable(obj):
-    """Recursively convert NumPy types to Python native types."""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {key: convert_to_serializable(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_to_serializable(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(convert_to_serializable(item) for item in obj)
-    elif isinstance(obj, torch.Tensor):
-        return convert_to_serializable(obj.cpu().numpy())
-    else:
-        return obj
 
-# ============================================================
-# 1. PREPROCESSING
-# ============================================================
-def preprocess_image(image_path: str) -> np.ndarray:
-    img = cv2.imread(image_path)
-    if img is None:
-        raise FileNotFoundError(f"Can't read: {image_path}")
+# ─────────────────────────────────────────
+# OCR  –  TWO MODES
+# ─────────────────────────────────────────
+def ocr_lines(image):
+    """Full text preserving line order (used for ALL regex matching)."""
+    return pytesseract.image_to_string(image, config="--psm 6")
 
-    h, w = img.shape[:2]
-    if max(h, w) < 1000:
-        img = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.fastNlMeansDenoising(gray, h=7)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    contrast = clahe.apply(denoised)
+def ocr_words(image):
+    """Raw word list (used only for merchant fallback scan)."""
+    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    return [w.strip() for w in data["text"] if w.strip()]
 
-    binary = cv2.adaptiveThreshold(contrast, 255,
-                                   cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 11, 2)
 
-    # Deskew
-    coords = np.column_stack(np.where(binary > 0))
-    if len(coords) > 0:
-        angle = cv2.minAreaRect(coords)[-1]
-        if angle < -45:
-            angle = -(90 + angle)
-        else:
-            angle = -angle
-        if abs(angle) > 0.5:
-            (h, w) = binary.shape[:2]
-            center = (w // 2, h // 2)
-            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            binary = cv2.warpAffine(binary, M, (w, h),
-                                    flags=cv2.INTER_CUBIC,
-                                    borderMode=cv2.BORDER_REPLICATE)
-    return binary
+def flat(text):
+    """Collapse newlines/tabs to single spaces — keeps label+value on one string."""
+    return " ".join(text.split())
 
-# ============================================================
-# 2. OCR
-# ============================================================
-def run_ocr(binary_img: np.ndarray) -> tuple:
-    h, w = binary_img.shape[:2]
-    data = pytesseract.image_to_data(binary_img, output_type=pytesseract.Output.DICT,
-                                     config="--oem 3 --psm 6")
-    words, boxes = [], []
-    for i in range(len(data["text"])):
-        text = data["text"][i].strip()
-        conf = int(data["conf"][i]) if data["conf"][i] != -1 else 0
-        if not text or conf < CONFIG["min_ocr_conf"]:
-            continue
-        clean = "".join(ch for ch in text if ch.isalnum() or ch in "₹/-.,:@")
-        if not clean:
-            continue
-        x, y, bw, bh = (data["left"][i], data["top"][i],
-                        data["width"][i], data["height"][i])
-        words.append(clean)
-        boxes.append([
-            int(1000 * x / w), int(1000 * y / h),
-            int(1000 * (x + bw) / w), int(1000 * (y + bh) / h)
-        ])
-    return words, boxes
-# ============================================================
-# 3. MERGE SPACED CHARACTERS
-# ============================================================
-def merge_spaced_chars(words, boxes):
-    if not words:
-        return words, boxes
-    merged_words, merged_boxes = [], []
-    i = 0
-    while i < len(words):
-        if len(words[i]) == 1:
-            group = [words[i]]
-            gbox = list(boxes[i])
-            j = i + 1
-            while j < len(words) and len(words[j]) <= 2:
-                prev = boxes[j-1]
-                curr = boxes[j]
-                gap = curr[0] - prev[2]
-                char_w = max(prev[2] - prev[0], 1)
-                y_diff = abs((prev[1]+prev[3])/2 - (curr[1]+curr[3])/2)
-                if gap < char_w * 3 and y_diff < 20:
-                    group.append(words[j])
-                    gbox[2] = curr[2]
-                    gbox[3] = max(gbox[3], curr[3])
-                    j += 1
-                else:
+
+# ─────────────────────────────────────────
+# GSTIN
+# ─────────────────────────────────────────
+def extract_gstin(line_text):
+    f = flat(line_text)
+
+    standard = re.findall(r'\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b', f, re.IGNORECASE)
+    if standard:
+        return standard[0].upper()
+
+    relaxed = re.findall(r'\b\d{2}[A-Z0-9]{13}\b', f, re.IGNORECASE)
+    for c in relaxed:
+        if re.search(r'[A-Z]', c, re.IGNORECASE) and re.search(r'\d', c):
+            return c.upper()
+
+    return None
+
+
+# ─────────────────────────────────────────
+# INVOICE NUMBER
+# ─────────────────────────────────────────
+def extract_invoice_number(f):
+    m = re.search(r'\b(?:INV|AAP|[A-Z]{2,5})[\/\-]\d{4}[-\/]\d{2,4}[\/\-]\d+', f, re.IGNORECASE)
+    if m:
+        return m.group()
+
+    m = re.search(r'Bill\s*#\s*(\d{4,5})', f, re.IGNORECASE)
+    if m:
+        val = m.group(1)
+        if len(val) == 5:
+            val = val[1:]
+        return val
+
+    m = re.search(
+        r'(?:Invoice\s*No\.?|Inv\s*No\.?|Invoice\s*Number)'
+        r'\s*[:\-\.\s]\s*(\d{3,6})',
+        f, re.IGNORECASE
+    )
+    if m:
+        return m.group(1)
+
+    return None
+
+
+# ─────────────────────────────────────────
+# DATE
+# ─────────────────────────────────────────
+def extract_date(f):
+    m = re.search(
+        r'(?:Invoice\s*Date|Bill\s*Date|Date\s*:)[^\d]{0,5}(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
+        f, re.IGNORECASE
+    )
+    if m:
+        return m.group(1)
+
+    for d in re.findall(r'\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b', f):
+        parts = re.split(r'[\/\-]', d)
+        if len(parts) == 3 and 1 <= int(parts[1]) <= 12 and 1 <= int(parts[0]) <= 31:
+            return d
+    return None
+
+
+# ─────────────────────────────────────────
+# MERCHANT
+# ─────────────────────────────────────────
+def extract_merchant(line_text, words):
+    noise_triggers  = {"tax", "invoice", "receipt", "bill", "gstin", "gst",
+                       "date", "no", "number", "total", "amount"}
+    person_labels   = {"name", "phone", "email", "contact", "mob", "mobile"}
+    leading_fillers = {"for", "by", "from", "to", "dear"}
+    biz_kw          = {"pvt", "ltd", "limited", "private", "solutions", "stores",
+                       "trading", "industries", "enterprises", "services",
+                       "hardware", "media", "parts", "auto", "fashion",
+                       "house", "medical", "cloudprint"}
+
+    lines = [l.strip().lstrip("'\"`\u2018\u2019") for l in line_text.split('\n') if l.strip()]
+
+    def clean_line(line):
+        noise_triggers_local = {"tax", "invoice", "receipt", "bill", "gstin", "gst",
+                                 "date", "no", "number", "total", "amount", "services"}
+        tokens = line.split()
+        if not tokens:
+            return None
+
+        while tokens and tokens[0].lower().rstrip('.:,') in leading_fillers:
+            tokens = tokens[1:]
+        if not tokens:
+            return None
+
+        result = []
+        for t in tokens:
+            if t.lower().rstrip('.:,') in person_labels:
+                break
+            result.append(t)
+        tokens = result
+        if not tokens:
+            return None
+
+        clean = []
+        for i, t in enumerate(tokens):
+            if t == '&':
+                next_t = tokens[i+1].lower() if i + 1 < len(tokens) else ''
+                if next_t in noise_triggers_local or next_t in {'group', 'associates', 'co'}:
                     break
-            if len(group) > 1:
-                merged_words.append("".join(group))
-                merged_boxes.append(gbox)
-            else:
-                merged_words.append(words[i])
-                merged_boxes.append(boxes[i])
-            i = j
-        else:
-            merged_words.append(words[i])
-            merged_boxes.append(boxes[i])
-            i += 1
-    return merged_words, merged_boxes
-
-# ============================================================
-# 4. LAYOUTLMv3 MODEL
-# ============================================================
-class LayoutLMv3Extractor:
-    def __init__(self, model_dir: str, device: str):
-        self.device = device
-        self.processor = LayoutLMv3Processor.from_pretrained(model_dir, apply_ocr=False)
-        self.model = LayoutLMv3ForTokenClassification.from_pretrained(model_dir)
-        self.model.to(device)
-        self.model.eval()
-        self.id2label = self.model.config.id2label
-
-    def predict(self, image: Image.Image, words: list, boxes: list):
-        encoding = self.processor(image, words, boxes=boxes,
-                                  return_tensors="pt",
-                                  truncation=True,
-                                  padding="max_length",
-                                  max_length=CONFIG["max_seq_length"])
-        encoding = {k: v.to(self.device) for k, v in encoding.items()}
-        with torch.no_grad():
-            outputs = self.model(**encoding)
-        logits = outputs.logits
-        probs = torch.softmax(logits, dim=-1).squeeze().cpu().numpy()
-        pred_ids = logits.argmax(-1).squeeze().tolist()
-        return pred_ids, probs
-
-    def decode_predictions(self, pred_ids, probs, word_ids, words):
-        word_preds = {}
-        for token_idx, word_idx in enumerate(word_ids):
-            if word_idx is None:
+                clean.append(t)
                 continue
-            label = self.id2label.get(pred_ids[token_idx], "O")
-            conf = float(probs[token_idx][pred_ids[token_idx]])
-            if word_idx not in word_preds or conf > word_preds[word_idx][1]:
-                word_preds[word_idx] = (label, conf)
+            if t.lower().rstrip('.:,&') in noise_triggers_local:
+                break
+            if re.search(r'\d', t):
+                break
+            clean.append(t)
+        name = " ".join(clean[:6]).rstrip('& ').strip()
+        return name if name else None
 
-        fields = {}
-        current_field = None
-        current_value = []
-        current_conf = 0.0
-        for idx, word in enumerate(words):
-            if idx not in word_preds:
-                continue
-            label, conf = word_preds[idx]
-            if label.startswith("B-"):
-                if current_field and current_value:
-                    fields[current_field] = {
-                        "value": " ".join(current_value),
-                        "confidence": round(current_conf / len(current_value), 3)
-                    }
-                current_field = label[2:]
-                current_value = [word]
-                current_conf = conf
-            elif label.startswith("I-") and current_field == label[2:]:
-                current_value.append(word)
-                current_conf += conf
-            else:
-                if current_field and current_value:
-                    fields[current_field] = {
-                        "value": " ".join(current_value),
-                        "confidence": round(current_conf / len(current_value), 3)
-                    }
-                current_field = None
-                current_value = []
-                current_conf = 0.0
-        if current_field and current_value:
-            fields[current_field] = {
-                "value": " ".join(current_value),
-                "confidence": round(current_conf / len(current_value), 3)
-            }
-        return fields
-# ============================================================
-# 5. INTELLIGENT POST-PROCESSING (FIXED - No tuple index errors)
-# ============================================================
-def post_process_fields(words, full_text, model_fields):
-    """Fix common model errors: GSTIN as merchant, wrong GST amount, etc."""
-
-    # Start with model predictions
-    final_fields = {}
-    for field, data in model_fields.items():
-        if data.get('value'):
-            final_fields[field] = data.copy()
-
-    # ========== FIX 1: MERCHANT should NOT be a GSTIN ==========
-    if final_fields.get("MERCHANT", {}).get("value"):
-        merchant_val = final_fields["MERCHANT"]["value"]
-        if GSTIN_RE.match(merchant_val) or len(merchant_val) == 15:
-            # This is a GSTIN, not a merchant - clear it
-            print(f"   Correcting: MERCHANT '{merchant_val}' is actually a GSTIN")
-            del final_fields["MERCHANT"]
-
-    # Extract real merchant from "XYZ Traders" or similar
-    if not final_fields.get("MERCHANT"):
-        # Look for company names in the text (before the first GSTIN)
-        lines = full_text.split('\n')
-        for i, line in enumerate(lines[:20]):  # Check top portion of invoice
-            line_clean = line.strip()
-            # Skip lines with GSTIN, date, invoice no, or common keywords
-            if (GSTIN_RE.search(line_clean) or
-                "INVOICE" in line_clean.upper() or
-                "DATE" in line_clean.upper() or
-                "BILL" in line_clean.upper() or
-                len(line_clean) < 5):
-                continue
-
-            # Look for capitalized words (company name pattern)
-            # e.g., "XYZ Traders", "ABC Enterprises", "Acme Corp"
-            words_in_line = line_clean.split()
-            if len(words_in_line) >= 2:
-                # Check if first two words are properly capitalized
-                if (words_in_line[0][0].isupper() and
-                    (len(words_in_line[1]) > 2 and words_in_line[1][0].isupper() or words_in_line[1].islower())):
-                    # This looks like a company name
-                    merchant_candidate = " ".join(words_in_line[:3])  # Take up to 3 words
-                    if len(merchant_candidate) > 5 and not GSTIN_RE.match(merchant_candidate):
-                        final_fields["MERCHANT"] = {
-                            "value": merchant_candidate,
-                            "confidence": 0.85,
-                            "source": "post_process"
-                        }
-                        print(f"  Found MERCHANT: {merchant_candidate}")
-                        break
-
-    # ========== FIX 2: Calculate correct GST amount from line items ==========
-    # Look for the table pattern in the text
-    # Parse line items to calculate GST sum
-    gst_sum = 0
-    taxable_sum = 0
-
-    # Find table rows - look for lines with numbers and "TAX" column
-    lines = full_text.split('\n')
-    in_table = False
-    table_rows = []
-
-    for line in lines:
-        line_clean = line.strip()
-        # Detect table header
-        if 'SL' in line_clean.upper() and 'ITEM' in line_clean.upper() and 'TAX' in line_clean.upper():
-            in_table = True
+    for line in lines[:20]:
+        if any(ch.isdigit() for ch in line):
             continue
+        result = clean_line(line)
+        if result and len(result) > 3:
+            return result
 
-        if in_table and line_clean and '---' not in line_clean:
-            # Look for pattern: number + word + number + number + number + number
-            # Example: "1 Oil 3 248 133.92 877.92"
-            parts = line_clean.split()
-            if len(parts) >= 6:
-                try:
-                    # Try to identify which part is the tax amount
-                    # Usually the 5th or 2nd last column
-                    for i, part in enumerate(parts):
-                        # Check if this looks like a tax amount (decimal with 2 places)
-                        if re.match(r'^\d+(?:\.\d{2})$', part):
-                            tax_val = float(part)
-                            if 0 < tax_val < 10000:  # Reasonable tax amount
-                                gst_sum += tax_val
-                                break
-                except:
-                    pass
+    for line in lines[:20]:
+        low_set = {t.lower().strip('.:,&—–-') for t in line.split()}
+        if not (low_set & biz_kw):
+            continue
+        gstin_idx = re.search(r'\bGSTIN\b', line, re.IGNORECASE)
+        trimmed = line[:gstin_idx.start()].strip() if gstin_idx else line
+        result = clean_line(trimmed)
+        if result and len(result) > 3:
+            return result
 
-    # Alternative: Use regex to find all numbers that appear after "TAX" or look like tax amounts
-    if gst_sum == 0:
-        # Find all numbers with 2 decimal places that are not rates
-        tax_pattern = r'(\d+(?:\.\d{2}))'
-        all_numbers = re.findall(tax_pattern, full_text)
+    noise = {"invoice","proforma","tax","bill","date","due","gst","gstin",
+             "total","amount","cgst","sgst","igst","no","number","ref",
+             "order","challan","transport","phone","email","name","original",
+             "customer","detail","address","shop","sales","for","the","and"}
+    clean = []
+    for w in words[:25]:
+        if not re.match(r'^[A-Za-z]+$', w): continue
+        if len(w) <= 2 or w.lower() in noise: continue
+        if len(set(w.lower())) < 3: continue
+        if w not in clean:
+            clean.append(w)
+    return " ".join(clean[:3]) if clean else None
 
-        # Look for numbers that appear in table context
-        # Get lines that contain numbers and seem like line items
-        for line in lines:
-            if any(x in line.upper() for x in ['OIL', 'MILK', 'RICE', 'SUGAR', 'ITEM']):
-                numbers = re.findall(tax_pattern, line)
-                if len(numbers) >= 3:
-                    # The tax amount is typically the second last or third last number
-                    try:
-                        potential_tax = float(numbers[-2]) if len(numbers) >= 2 else 0
-                        if 0 < potential_tax < 10000:
-                            gst_sum += potential_tax
-                    except:
-                        pass
 
-    # If we found GST from line items, use it
-    if gst_sum > 0:
-        final_fields["GST_AMOUNT"] = {
-            "value": f"{gst_sum:.2f}",
-            "confidence": 0.95,
-            "source": "calculated_from_items"
-        }
-        print(f"  Calculated GST_AMOUNT: {gst_sum:.2f} from line items")
+# ─────────────────────────────────────────
+# TOTAL AMOUNT
+# ─────────────────────────────────────────
+def extract_total(f):
+    patterns = [
+        r'Total\s*Amount\s*After\s*Tax[^\d]{0,15}([\d,]+\.\d{2})',
+        r'NET\s*PAYABLE[^\d]{0,15}([\d,]+\.\d{2})',
+        r'Balance\s*Due[^\d]{0,15}([\d,]+\.\d{2})',
+        r'Gross\s*Total[^\d]{0,10}([\d,]+\.\d{2})',
+        r'Grand\s*Total[^\d]{0,10}([\d,]+\.\d{2})',
+        r'Total\s*[Aa]mount(?!\s*\(in\s*words\))(?!\s*After)(?!\s*\(GST\))[^\d]{0,10}([\d,]+\.\d{2})',
+        r'\bTOTAL\b[^\d]{0,5}([\d,]+\.\d{2})',
+    ]
+    for pat in patterns:
+        matches = re.findall(pat, f, re.IGNORECASE)
+        if matches:
+            return float(matches[-1].replace(",", ""))
+    return None
 
-    # ========== FIX 3: Ensure GSTIN is correctly identified ==========
-    if not final_fields.get("GSTIN"):
-        # Find all GSTINs in the document
-        gstins = GSTIN_RE.findall(full_text.upper())
-        if gstins:
-            # First GSTIN is usually the supplier (merchant)
-            final_fields["GSTIN"] = {
-                "value": gstins[0],
-                "confidence": 0.95,
-                "source": "regex_extracted"
-            }
-            print(f"  Found GSTIN: {gstins[0]}")
 
-    # ========== FIX 4: Validate GST amount is reasonable ==========
-    if final_fields.get("GST_AMOUNT") and final_fields.get("TOTAL_AMOUNT"):
-        try:
-            gst_val = float(re.sub(r'[^\d.]', '', str(final_fields["GST_AMOUNT"]["value"])))
-            total_val = float(re.sub(r'[^\d.]', '', str(final_fields["TOTAL_AMOUNT"]["value"])))
+# ─────────────────────────────────────────
+# TAXABLE AMOUNT
+# ─────────────────────────────────────────
+def extract_taxable(f):
+    patterns = [
+        r'Taxable\s*Amount[^\d]{0,10}([\d,]+\.\d{2})',
+        r'Sub\s*Total[^\d]{0,10}(?:Rs\.?)?\s*([\d,]+\.\d{2})',
+        r'Total\s*Amount[^\d]{0,10}([\d,]+\.\d{2})(?=.{0,300}Taxes\s*\(GST\))',
+    ]
+    for pat in patterns:
+        m = re.search(pat, f, re.IGNORECASE | re.DOTALL)
+        if m:
+            return float(m.group(1).replace(",", ""))
+    return None
 
-            # GST should be less than total and typically 5-28% of total
-            if gst_val > total_val:
-                print(f"  Invalid GST_AMOUNT ({gst_val}) > TOTAL ({total_val}) - correcting")
-                # Calculate reasonable GST (~18% of total)
-                reasonable_gst = round(total_val * 0.18 / (1 + 0.18), 2)
-                final_fields["GST_AMOUNT"] = {
-                    "value": f"{reasonable_gst:.2f}",
-                    "confidence": 0.70,
-                    "source": "estimated"
-                }
-        except:
-            pass
 
-    # ========== FIX 5: Calculate taxable amount if missing ==========
-    if not final_fields.get("TAXABLE_AMOUNT") and final_fields.get("TOTAL_AMOUNT") and final_fields.get("GST_AMOUNT"):
-        try:
-            total_val = float(re.sub(r'[^\d.]', '', str(final_fields["TOTAL_AMOUNT"]["value"])))
-            gst_val = float(re.sub(r'[^\d.]', '', str(final_fields["GST_AMOUNT"]["value"])))
-            taxable_val = total_val - gst_val
-            if taxable_val > 0:
-                final_fields["TAXABLE_AMOUNT"] = {
-                    "value": f"{taxable_val:.2f}",
-                    "confidence": 0.85,
-                    "source": "calculated"
-                }
-                print(f"   Calculated TAXABLE_AMOUNT: {taxable_val:.2f}")
-        except:
-            pass
+# ─────────────────────────────────────────
+# GST AMOUNT
+# ─────────────────────────────────────────
+def extract_gst(f):
+    total_gst = 0.0
+    found = False
 
-    return final_fields
-# ============================================================
-# 6. MAIN EXTRACTION FUNCTION
-# ============================================================
-def extract_invoice(image_path: str, model_extractor: LayoutLMv3Extractor) -> dict:
-    """Main function to extract invoice fields from an image."""
-    try:
-        # Preprocess image
-        binary_img = preprocess_image(image_path)
-        
-        # Run OCR
-        words, boxes = run_ocr(binary_img)
-        
-        if not words:
-            return {"error": "No text found in image", "fields": {}, "ocr_word_count": 0}
-        
-        # Merge spaced characters
-        words, boxes = merge_spaced_chars(words, boxes)
-        
-        # Convert to PIL Image for model
-        pil_image = Image.fromarray(binary_img).convert("RGB")
-        
-        # Get model predictions
-        pred_ids, probs = model_extractor.predict(pil_image, words, boxes)
-        
-        # Get token-word mapping
-        encoding = model_extractor.processor(pil_image, words, boxes=boxes,
-                                             return_tensors="pt",
-                                             truncation=True,
-                                             padding="max_length",
-                                             max_length=CONFIG["max_seq_length"])
-        word_ids = encoding.word_ids()
-        
-        # Decode predictions
-        model_fields = model_extractor.decode_predictions(pred_ids, probs, word_ids, words)
-        
-        # Get full text for post-processing
-        full_text = " ".join(words)
-        
-        # Apply intelligent post-processing
-        final_fields = post_process_fields(words, full_text, model_fields)
-        
-        # Return result
-        return {
-            "image": Path(image_path).name,
-            "fields": final_fields,
-            "raw_model_predictions": model_fields,  # Keep for debugging
-            "ocr_word_count": len(words),
-            "full_text": full_text  # Optional: useful for debugging
-        }
-        
-    except Exception as e:
-        return {"error": str(e), "fields": {}, "ocr_word_count": 0}
-# ============================================================
-# 7. SINGLE IMAGE PROCESSING (CLEAN VERSION - NO RAW PREDICTIONS)
-# ============================================================
-def process_single_image(image_path: str, model_extractor: LayoutLMv3Extractor, output_dir: Path = None, debug: bool = False):
-    """Process a single image and optionally save JSON output."""
-    print(f"\n{'='*60}")
-    print(f" Processing: {Path(image_path).name}")
-    print(f"{'='*60}")
+    igst_vals = re.findall(
+        r'\bIGST\b\s*(?:@\s*\d+%?|[\(\d%\)]+)?\s*[:\s]+(?:Rs\.?)?\s*([\d,]+\.\d{2})',
+        f, re.IGNORECASE
+    )
+    if igst_vals:
+        total_gst += max(float(v.replace(",", "")) for v in igst_vals)
+        found = True
 
-    result = extract_invoice(image_path, model_extractor)
+    cgst = re.findall(r'(?:Add\s*[:\-]?\s*)?CGST\b[^\d%]{0,10}([\d,]+\.\d{2})', f, re.IGNORECASE)
+    sgst = re.findall(r'(?:Add\s*[:\-]?\s*)?SGST\b[^\d%]{0,10}([\d,]+\.\d{2})', f, re.IGNORECASE)
+    if cgst and sgst and not found:
+        total_gst += float(cgst[-1].replace(",", "")) + float(sgst[-1].replace(",", ""))
+        found = True
 
-    if "error" in result:
-        print(f" Error: {result['error']}")
-    else:
-        print(f"\n{'='*60}")
-        print(" EXTRACTED FIELDS")
-        print(f"{'='*60}")
+    if not found:
+        tl = re.findall(
+            r'(?:Total\s*Tax|Taxes\s*\(GST\)|Tax\s*Amount)[^\d]{0,10}([\d,]+\.\d{2})',
+            f, re.IGNORECASE
+        )
+        if tl:
+            total_gst = float(tl[-1].replace(",", ""))
+            found = True
 
-        for field, data in result.get("fields", {}).items():
-            value = data.get("value", "N/A")
-            conf = data.get("confidence", 0)
-            print(f"  {field:20s} : {value:<35} (conf: {conf:.2f})")
+    return round(total_gst, 2) if found else None
 
-        print(f"\n{'='*60}")
-        print(f" OCR Word Count: {result.get('ocr_word_count', 0)}")
 
-        # Only show raw predictions in debug mode
-        if debug and result.get("raw_model_predictions"):
-            print(f"\n{'='*60}")
-            print(" DEBUG: Raw Model Predictions")
-            print(f"{'='*60}")
-            for field, data in result["raw_model_predictions"].items():
-                if data.get('value'):
-                    print(f"  {field:20s} : {data['value']} (conf: {data['confidence']})")
+# ─────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────
+def extract_invoice(image_path):
+    image     = Image.open(image_path).convert("RGB")
+    line_text = ocr_lines(image)
+    words     = ocr_words(image)
+    f         = flat(line_text)
 
-    # Save JSON - exclude raw predictions by default
-    if output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        img_name = Path(image_path).stem
-        out_path = output_dir / f"{img_name}.json"
+    result = {}
 
-        # Create clean version without raw predictions
-        save_result = {
-            "image": result.get("image"),
-            "fields": result.get("fields", {}),
-            "ocr_word_count": result.get("ocr_word_count", 0),
-            "processing_timestamp": str(Path(image_path).stat().st_mtime)  # Optional: add timestamp
-        }
+    gstin = extract_gstin(line_text)
+    if gstin:
+        result["GSTIN"] = gstin
 
-        serializable_result = convert_to_serializable(save_result)
+    inv = extract_invoice_number(f)
+    if inv:
+        result["INVOICE_NO"] = inv
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(serializable_result, f, indent=2, ensure_ascii=False)
-        print(f"\n JSON saved to: {out_path}")
+    date = extract_date(f)
+    if date:
+        result["INVOICE_DATE"] = date
+
+    merchant = extract_merchant(line_text, words)
+    if merchant:
+        result["MERCHANT"] = merchant
+
+    total   = extract_total(f)
+    taxable = extract_taxable(f)
+    gst     = extract_gst(f)
+
+    if total is not None and taxable is not None and taxable >= total:
+        taxable = None
+
+    if total   is not None: result["TOTAL_AMOUNT"]   = total
+    if taxable is not None: result["TAXABLE_AMOUNT"]  = taxable
+    if gst is not None:
+        result["GST_AMOUNT"] = gst
+    elif total is not None and taxable is not None:
+        result["GST_AMOUNT"] = round(total - taxable, 2)
 
     return result
 
-# ============================================================
-# 8. MAIN (with debug flag)
-# ============================================================
-def main():
-    # Set Tesseract path
-    if os.name == 'nt':  # Windows
-        CONFIG["tesseract_cmd"] = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    else:  # Linux/Mac
-        CONFIG["tesseract_cmd"] = "/usr/bin/tesseract"
 
-    pytesseract.pytesseract.tesseract_cmd = CONFIG["tesseract_cmd"]
-
-    print(f"  Device: {CONFIG['device']}")
-    print(f" Model dir: {CONFIG['model_dir']}")
-
-    # Initialize model
-    print("\n Loading model...")
-    model_extractor = LayoutLMv3Extractor(CONFIG["model_dir"], CONFIG["device"])
-    print(" Model loaded successfully!")
-
-    # ============================================================
-    # SPECIFY YOUR TEST IMAGE PATH HERE
-    # ============================================================
-    single_image_path = r"/content/drive/MyDrive/TScript/test/images/invoice_.png"
-
-    if not os.path.exists(single_image_path):
-        print(f"\n Image not found: {single_image_path}")
-        return
-
-    # Process with debug=False for clean output, debug=True to see raw predictions
-    result = process_single_image(
-        single_image_path,
-        model_extractor,
-        output_dir=Path("./extracted_results"),
-        debug=False  # ← Set to True only when debugging model issues
-    )
-
+# ─────────────────────────────────────────
+# RUN
+# ─────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    image_paths = [
+        r"F:\newdataset\images\extra_017_fmt9.png",
+        r"F:\newdataset\images\synth_001_fmt1.png",
+        r"F:\newdataset\images\synth_015_fmt2.png",
+        r"F:\newdataset\images\synth_021_fmt3.png",
+        r"F:\newdataset\images\invoice_16.png",
+    ]
+
+    fields = [
+        ("GSTIN",          "  GSTIN"),
+        ("INVOICE_NO",     " Invoice No"),
+        ("INVOICE_DATE",   " Invoice Date"),
+        ("MERCHANT",       " Merchant"),
+        ("TOTAL_AMOUNT",   " Total Amount"),
+        ("TAXABLE_AMOUNT", " Taxable Amount"),
+        ("GST_AMOUNT",     " Total GST"),
+    ]
+
+    for path in image_paths:
+        fname = os.path.basename(path)
+        if not os.path.exists(path):
+            print(f"\n  File not found: {path}")
+            continue
+
+        print(f"\n{'='*50}")
+        print(f" FILE: {fname}")
+        print('='*50)
+
+        result = extract_invoice(path)
+
+        for key, label in fields:
+            val = result.get(key, " NOT FOUND")
+            print(f"  {label:<22}: {val}")
