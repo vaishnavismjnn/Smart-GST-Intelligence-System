@@ -1,4 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from typing import List
 from PIL import Image
 import io
 
@@ -9,70 +10,54 @@ from backend.db import collection
 
 router = APIRouter()
 
-
 @router.post("/process")
-async def process_invoice(file: UploadFile = File(...)):
-    file_bytes = await file.read()
+async def process_invoice(files: List[UploadFile] = File(...)):  # ✅ List
+    results = []
 
-    # 1. OCR extraction
-    try:
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-        extracted = extract_invoice_from_image(image)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"OCR failed: {str(e)}")
+    for file in files:
+        file_bytes = await file.read()
 
-    # 2. Validate
-    extracted["validation"] = {
-        "gst_valid":     validate_gst(extracted.get("GSTIN")),
-        "amounts_match": validate_amounts(
-                             extracted.get("TOTAL_AMOUNT"),
-                             extracted.get("TAXABLE_AMOUNT"),
-                             extracted.get("GST_AMOUNT")
-                         )
-    }
+        # 1. OCR extraction
+        try:
+            image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            extracted = extract_invoice_from_image(image)
+        except Exception as e:
+            results.append({"filename": file.filename, "error": f"OCR failed: {str(e)}"})
+            continue
 
-    # 3. Upload to Cloudinary
-    try:
-        result = upload_to_cloudinary(io.BytesIO(file_bytes))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        # 2. Validate
+        extracted["validation"] = {
+            "gst_valid":     validate_gst(extracted.get("GSTIN")),
+            "amounts_match": validate_amounts(
+                                 extracted.get("TOTAL_AMOUNT"),
+                                 extracted.get("TAXABLE_AMOUNT"),
+                                 extracted.get("GST_AMOUNT")
+                             )
+        }
 
-    # 4. Save to MongoDB
-    doc = {
-        "filename":       file.filename,
-        "cloudinary_url": result["url"],
-        "public_id":      result["public_id"],
-        "status":         "processed",
-        **extracted
-    }
-    insert_result = collection.insert_one(doc)
+        # 3. Upload to Cloudinary
+        try:
+            result = upload_to_cloudinary(io.BytesIO(file_bytes))
+        except Exception as e:
+            results.append({"filename": file.filename, "error": f"Upload failed: {str(e)}"})
+            continue
 
-    return {
-        "message":        "✅ Invoice processed successfully",
-        "filename":       file.filename,
-        "cloudinary_url": result["url"],
-        "record_id":      str(insert_result.inserted_id),
-        "extracted":      extracted
-    }
+        # 4. Save to MongoDB
+        doc = {
+            "filename":       file.filename,
+            "cloudinary_url": result["url"],
+            "public_id":      result["public_id"],
+            "status":         "processed",
+            **extracted
+        }
+        insert_result = collection.insert_one(doc)
 
+        results.append({
+            "message":        "✅ Invoice processed successfully",
+            "filename":       file.filename,
+            "cloudinary_url": result["url"],
+            "record_id":      str(insert_result.inserted_id),
+            "extracted":      extracted
+        })
 
-@router.get("/records")
-async def get_all_records():
-    records = []
-    for doc in collection.find():
-        doc["_id"] = str(doc["_id"])
-        records.append(doc)
-    return {"records": records}
-
-
-@router.get("/records/{record_id}")
-async def get_record(record_id: str):
-    from bson import ObjectId
-    try:
-        doc = collection.find_one({"_id": ObjectId(record_id)})
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid record ID format")
-    if not doc:
-        raise HTTPException(status_code=404, detail="Record not found")
-    doc["_id"] = str(doc["_id"])
-    return doc
+    return {"total": len(files), "results": results}

@@ -2,13 +2,14 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 
-
+from backend.routes.auth import router as auth_router
 from backend.routes.process import router as process_router
 from backend.services.upload_service import upload_to_cloudinary
 from backend.db import collection
 import backend.config  # initializes Cloudinary
 
 app = FastAPI()
+app.include_router(auth_router, prefix="/auth")
 app.include_router(process_router)
 # ── CORS ── allow frontend to call this API ──────────────────
 app.add_middleware(

@@ -1,16 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from backend.core.security import hash_password, verify_password, create_access_token
+from backend.db import db
+from datetime import datetime
 
 router = APIRouter()
 
-# 🔥 TEMP storage (later MongoDB)
-fake_users_db = {
-    "test@test.com": {          # ✅ always exists even after reload
-        "email": "test@test.com",
-        "password": hash_password("test123")
-    }
-}
-
+# Step 1 — unique index on startup
+db.users.create_index("email", unique=True)
 
 # -----------------------------
 # SIGNUP
@@ -20,19 +16,20 @@ def signup(data: dict):
     email = data.get("email")
     password = data.get("password")
 
-    # 🔥 FIX: validate input
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required")
 
-    if email in fake_users_db:
+    existing_user = db.users.find_one({"email": email})  # no await
+    if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
 
     hashed = hash_password(password)
 
-    fake_users_db[email] = {
+    db.users.insert_one({           # no await
         "email": email,
-        "password": hashed
-    }
+        "password": hashed,
+        "created_at": datetime.utcnow()
+    })
 
     return {"message": "User created successfully"}
 
@@ -44,11 +41,10 @@ def login(data: dict):
     email = data.get("email")
     password = data.get("password")
 
-    # 🔥 FIX
     if not email or not password:
         raise HTTPException(status_code=400, detail="Email and password required")
 
-    user = fake_users_db.get(email)
+    user = db.users.find_one({"email": email})  # no await
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

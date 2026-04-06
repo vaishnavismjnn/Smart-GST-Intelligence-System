@@ -1,78 +1,21 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from PIL import Image
-import io
+from passlib.context import CryptContext
+from jose import jwt
+from datetime import datetime, timedelta
 
-from backend.services.validation import validate_gst, validate_amounts
-from backend.services.extract_invoice import extract_invoice_from_image
-from backend.services.upload_service import upload_to_cloudinary
-from backend.db import collection
+SECRET_KEY = "c41546e2d5c10ffabc24511ab1f812d9ce055ded767a63a26916f846a4d83622"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-router = APIRouter()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
-@router.post("/process")
-async def process_invoice(file: UploadFile = File(...)):
-    file_bytes = await file.read()
+def verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
 
-    # 1. OCR extraction
-    try:
-        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
-        extracted = extract_invoice_from_image(image)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"OCR failed: {str(e)}")
-
-    # 2. Validate
-    extracted["validation"] = {
-        "gst_valid":     validate_gst(extracted.get("GSTIN")),
-        "amounts_match": validate_amounts(
-                             extracted.get("TOTAL_AMOUNT"),
-                             extracted.get("TAXABLE_AMOUNT"),
-                             extracted.get("GST_AMOUNT")
-                         )
-    }
-
-    # 3. Upload to Cloudinary
-    try:
-        result = upload_to_cloudinary(io.BytesIO(file_bytes))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
-
-    # 4. Save to MongoDB
-    doc = {
-        "filename":       file.filename,
-        "cloudinary_url": result["url"],
-        "public_id":      result["public_id"],
-        "status":         "processed",
-        **extracted
-    }
-    insert_result = collection.insert_one(doc)
-
-    return {
-        "message":        "✅ Invoice processed successfully",
-        "filename":       file.filename,
-        "cloudinary_url": result["url"],
-        "record_id":      str(insert_result.inserted_id),
-        "extracted":      extracted
-    }
-
-
-@router.get("/records")
-async def get_all_records():
-    records = []
-    for doc in collection.find():
-        doc["_id"] = str(doc["_id"])
-        records.append(doc)
-    return {"records": records}
-
-
-@router.get("/records/{record_id}")
-async def get_record(record_id: str):
-    from bson import ObjectId
-    try:
-        doc = collection.find_one({"_id": ObjectId(record_id)})
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid record ID format")
-    if not doc:
-        raise HTTPException(status_code=404, detail="Record not found")
-    doc["_id"] = str(doc["_id"])
-    return doc
+def create_access_token(data: dict) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
