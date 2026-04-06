@@ -1,58 +1,78 @@
-from fastapi import APIRouter, Depends
-import time
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from PIL import Image
+import io
 
-from backend.core.security import get_current_user
-from backend.services.extractor import (
-    extract_date,
-    extract_structured,
-    validate_gst,
-    validate_amounts
-)
+from backend.services.validation import validate_gst, validate_amounts
+from backend.services.extract_invoice import extract_invoice_from_image
+from backend.services.upload_service import upload_to_cloudinary
+from backend.db import collection
 
-router= APIRouter()
+router = APIRouter()
 
 
-@router.post("/process-text")
-def process_text(
-    data: dict,
-    current_user: str = Depends(get_current_user)
-):
-    start_time = time.time()
+@router.post("/process")
+async def process_invoice(file: UploadFile = File(...)):
+    file_bytes = await file.read()
 
-    text = data.get("text", "")
+    # 1. OCR extraction
+    try:
+        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        extracted = extract_invoice_from_image(image)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"OCR failed: {str(e)}")
 
-    if not text.strip():
-        return {"error": "Empty input"}
+    # 2. Validate
+    extracted["validation"] = {
+        "gst_valid":     validate_gst(extracted.get("GSTIN")),
+        "amounts_match": validate_amounts(
+                             extracted.get("TOTAL_AMOUNT"),
+                             extracted.get("TAXABLE_AMOUNT"),
+                             extracted.get("GST_AMOUNT")
+                         )
+    }
 
-    lines = text.split("\n")
-    merchant = lines[0] if lines else None
-    category = "General"
+    # 3. Upload to Cloudinary
+    try:
+        result = upload_to_cloudinary(io.BytesIO(file_bytes))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    date = extract_date(text)
-    structured = extract_structured(text)
-
-    gst_valid = validate_gst(structured["gstin"])
-    amounts_valid = validate_amounts(
-        structured["total"],
-        structured["taxable"],
-        structured["gst_amount"]
-    )
+    # 4. Save to MongoDB
+    doc = {
+        "filename":       file.filename,
+        "cloudinary_url": result["url"],
+        "public_id":      result["public_id"],
+        "status":         "processed",
+        **extracted
+    }
+    insert_result = collection.insert_one(doc)
 
     return {
-        "merchant": {"value": merchant, "confidence": 0.9},
-        "invoice_date": {"value": date, "confidence": 0.9},
-        "gstin": {"value": structured["gstin"], "confidence": 0.95},
-        "taxable_amount": {"value": structured["taxable"]},
-        "gst_amount": {"value": structured["gst_amount"]},
-        "total_amount": {"value": structured["total"]},
-        "expense_category": category,
-        "validation": {
-            "gst_valid": gst_valid,
-            "amounts_match": amounts_valid,
-            "duplicate_found": False,
-            "audit_score": 95 if amounts_valid else 75
-        },
-        "processing": {
-            "latency_seconds": round(time.time() - start_time, 2)
-        }
+        "message":        "✅ Invoice processed successfully",
+        "filename":       file.filename,
+        "cloudinary_url": result["url"],
+        "record_id":      str(insert_result.inserted_id),
+        "extracted":      extracted
     }
+
+
+@router.get("/records")
+async def get_all_records():
+    records = []
+    for doc in collection.find():
+        doc["_id"] = str(doc["_id"])
+        records.append(doc)
+    return {"records": records}
+
+
+@router.get("/records/{record_id}")
+async def get_record(record_id: str):
+    from bson import ObjectId
+    try:
+        doc = collection.find_one({"_id": ObjectId(record_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid record ID format")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Record not found")
+    doc["_id"] = str(doc["_id"])
+    return doc

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pymongo
+python-dotenv
+cloudinary
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+pytesseract
+Pillow
+bson
