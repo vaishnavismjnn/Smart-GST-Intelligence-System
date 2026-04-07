@@ -2,7 +2,6 @@ import os
 import cv2
 from PIL import Image
 import pytesseract
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 import torch
 
 # ==============================
@@ -20,17 +19,6 @@ os.makedirs(printed_ocr_output, exist_ok=True)
 #  TESSERACT SETUP
 # ==============================
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-# ==============================
-#  TrOCR SETUP
-# ==============================
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-
-model.to(device)
-model.eval()   
 
 # ==============================
 #  PRINTED OCR (TESSERACT)
