@@ -1,4 +1,7 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
+from backend.core.security import SECRET_KEY, ALGORITHM
 from typing import List
 from PIL import Image
 import io
@@ -9,9 +12,26 @@ from backend.services.upload_service import upload_to_cloudinary
 from backend.db import collection
 
 router = APIRouter()
+bearer_scheme = HTTPBearer()
+
+# ← Get current user from token
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return email
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 @router.post("/process")
-async def process_invoice(file: UploadFile = File(...)):
+async def process_invoice(
+    file: UploadFile = File(...),
+    user_email: str = Depends(get_current_user)  # ← ADD THIS
+):
     file_bytes = await file.read()
 
     # 1. OCR extraction
@@ -37,12 +57,13 @@ async def process_invoice(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    # 4. Save to MongoDB
+    # 4. Save to MongoDB with user_email ← NEW
     doc = {
         "filename":       file.filename,
         "cloudinary_url": result["url"],
         "public_id":      result["public_id"],
         "status":         "processed",
+        "user_email":     user_email,  # ← ADDED
         **extracted
     }
     insert_result = collection.insert_one(doc)
