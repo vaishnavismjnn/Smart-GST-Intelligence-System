@@ -22,15 +22,60 @@ CHART_CFG = {"displayModeBar": False, "responsive": True}
 def _render_live_ticker(records):
     records = records or []
     processed = [r for r in records if r.get("MERCHANT") and r.get("status") == "processed"]
+
     if not processed:
         return
 
-    items = " · ".join(
-        f"{r['MERCHANT']} {fmt_inr(r.get('TOTAL_AMOUNT'))}"
-        for r in processed[-8:]
+    items = " &nbsp;·&nbsp; ".join(
+        f"<span style='color:#00D4AA;'>▸</span> {r['MERCHANT']} "
+        f"<span style='color:#F5C842;'>{fmt_inr(r.get('TOTAL_AMOUNT'))}</span>"
+        for r in processed[-10:]
     )
 
-    st.markdown(f"**LIVE:** {items}")
+    st.markdown(f"""
+    <div style="
+        overflow:hidden;
+        background:rgba(0,212,170,0.05);
+        border:1px solid rgba(0,212,170,0.15);
+        border-radius:10px;
+        padding:0.5rem 1rem;
+        margin-bottom:1.2rem;
+    ">
+        <div style="display:flex; align-items:center; gap:1rem;">
+            
+            <!-- LIVE TAG -->
+            <span style="
+                color:#00D4AA;
+                font-size:0.7rem;
+                font-weight:700;
+                letter-spacing:0.1em;
+                white-space:nowrap;
+            ">
+                ● LIVE
+            </span>
+
+            <!-- SCROLLING CONTENT -->
+            <div style="overflow:hidden; flex:1;">
+                <div style="
+                    white-space:nowrap;
+                    display:inline-block;
+                    animation: scrollTicker 18s linear infinite;
+                    font-size:0.85rem;
+                    color:#A0AEC0;
+                ">
+                    {items}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <style>
+    @keyframes scrollTicker {{
+        0%   {{ transform: translateX(100%); }}
+        100% {{ transform: translateX(-100%); }}
+    }}
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def _render_insight_bar(records):
