@@ -26,7 +26,8 @@ def _render_live_ticker(records):
     if not processed:
         return
 
-    items = " &nbsp;·&nbsp; ".join(
+    # Build ticker items
+    items = " &nbsp;&nbsp;•&nbsp;&nbsp; ".join(
         f"<span style='color:#00D4AA;'>▸</span> {r['MERCHANT']} "
         f"<span style='color:#F5C842;'>{fmt_inr(r.get('TOTAL_AMOUNT'))}</span>"
         for r in processed[-10:]
@@ -35,48 +36,65 @@ def _render_live_ticker(records):
     st.markdown(f"""
     <div style="
         overflow:hidden;
-        background:rgba(0,212,170,0.05);
+        background:linear-gradient(90deg, rgba(0,212,170,0.08), rgba(0,212,170,0.02));
         border:1px solid rgba(0,212,170,0.15);
-        border-radius:10px;
-        padding:0.5rem 1rem;
+        border-radius:12px;
+        padding:0.6rem 1rem;
         margin-bottom:1.2rem;
     ">
         <div style="display:flex; align-items:center; gap:1rem;">
-            
-            <!-- LIVE TAG -->
-            <span style="
-                color:#00D4AA;
+
+            <!-- LIVE INDICATOR -->
+            <div style="
+                display:flex;
+                align-items:center;
+                gap:6px;
+                white-space:nowrap;
                 font-size:0.7rem;
                 font-weight:700;
+                color:#00D4AA;
                 letter-spacing:0.1em;
-                white-space:nowrap;
             ">
-                ● LIVE
-            </span>
+                <span style="
+                    width:6px;
+                    height:6px;
+                    background:#00D4AA;
+                    border-radius:50%;
+                    animation:pulse 1.5s infinite;
+                "></span>
+                LIVE
+            </div>
 
-            <!-- SCROLLING CONTENT -->
-            <div style="overflow:hidden; flex:1;">
+            <!-- SCROLLING WRAPPER -->
+            <div style="overflow:hidden; flex:1; position:relative;">
                 <div style="
-                    white-space:nowrap;
                     display:inline-block;
-                    animation: scrollTicker 18s linear infinite;
+                    white-space:nowrap;
+                    padding-left:100%;
+                    animation: scrollTicker 20s linear infinite;
                     font-size:0.85rem;
                     color:#A0AEC0;
                 ">
                     {items}
                 </div>
             </div>
+
         </div>
     </div>
 
     <style>
     @keyframes scrollTicker {{
-        0%   {{ transform: translateX(100%); }}
+        0%   {{ transform: translateX(0%); }}
         100% {{ transform: translateX(-100%); }}
+    }}
+
+    @keyframes pulse {{
+        0%   {{ opacity: 1; }}
+        50%  {{ opacity: 0.3; }}
+        100% {{ opacity: 1; }}
     }}
     </style>
     """, unsafe_allow_html=True)
-
 
 def _render_insight_bar(records):
     records = records or []
