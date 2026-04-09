@@ -9,24 +9,28 @@ from components.illustrations import empty_records_illustration, render_illustra
 
 PAGE_SIZE = 10
 
+from utils.cleaner import normalize_record
+
 def _build_df(records):
     rows = []
     for r in records:
-        v = r.get("validation", {}) or {}
+        r = normalize_record(r)  # ✅ KEY CHANGE
+
+        v = r.get("validation")
+
         rows.append({
             "ID":        short_id(r.get("_id", "")),
-            "Merchant":  r.get("MERCHANT", "—"),
-            "GSTIN":     r.get("GSTIN", "—"),
+            "Merchant":  r.get("MERCHANT"),
+            "GSTIN":     r.get("GSTIN"),
             "Date":      fmt_date(r.get("INVOICE_DATE")),
             "Total":     r.get("TOTAL_AMOUNT"),
             "GST":       r.get("GST_AMOUNT"),
-            "GST Valid": v.get("gst_valid", False),
-            "Amt Match": v.get("amounts_match", False),
-            "Status":    r.get("status", "—"),
+            "GST Valid": v.get("gst_valid"),
+            "Amt Match": v.get("amounts_match"),
+            "Status":    r.get("status"),
             "_raw":      r,
         })
     return pd.DataFrame(rows)
-
 def show():
     if not is_authenticated():
         st.warning("Please log in.")

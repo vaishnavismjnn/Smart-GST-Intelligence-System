@@ -1,61 +1,54 @@
 # --- file: app.py ---
+
 import streamlit as st
 
+# ── Page Config MUST be first Streamlit call ─────────────────────
 st.set_page_config(
     layout="wide",
     page_title="GST Intelligence Platform",
     page_icon="🧾",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto",
 )
 
-# ── All CSS lives in styles.py ─────────────────────────────────
+# ── Styles (injected before anything renders) ─────────────────────
 from styles import load_css
 load_css()
 
-# ── Auth gate ──────────────────────────────────────────────────
+# ── Auth gate ─────────────────────────────────────────────────────
 from utils.auth import is_authenticated
 
 if not is_authenticated():
     from pages.login import show as login_show
     login_show()
 else:
-    # 1. This handles the Sidebar UI (The side buttons)
     from components.sidebar import render_sidebar
     render_sidebar()
-    # 2. UI CLEANUP: Force hide the default Streamlit top-bar and padding
-    st.markdown("""
-        <style>
-            
-            
-            /* Reduce top padding so content starts exactly at the top */
-            .block-container { padding-top: 1.5rem !important; }
-            
-            /* Ensure the sidebar doesn't have an 'empty' feeling at the top */
-            [data-testid="stSidebarNav"] { display: none; }
-        </style>
-    """, unsafe_allow_html=True)
+# Hide Streamlit's auto-generated multi-page nav (we use our own)
+# and tighten the top padding so page headers sit flush.
+st.markdown("""
+    <style>
+        [data-testid="stSidebarNav"] { display: none !important; }
+        .block-container { padding-top: 1.5rem !important; }
+    </style>
+""", unsafe_allow_html=True)
 
-    # 2. This gets the current choice from the sidebar
-    page = st.session_state.get("page", "dashboard")
+# ── Page Routing ──────────────────────────────────────────────────
+PAGE_MAP = {
+    "dashboard": "pages.dashboard",
+    "upload":    "pages.upload",
+    "records":   "pages.records",
+    "profile":   "pages.profile",
+    "itc":       "pages.itc_forecaster",
+    "forensic":  "pages.forensic_guard",
+}
 
-    # 3. This renders ONLY the page content in the main area
-    if page == "dashboard":
-        from pages.dashboard import show
-        show()
-    elif page == "upload":
-        from pages.upload import show
-        show()
-    elif page == "records":
-        from pages.records import show
-        show()
-    elif page == "profile":
-        from pages.profile import show
-        show()
-    elif page == "itc":
-        from pages.itc_forecaster import show
-        show()
-    elif page == "forensic":
-        from pages.forensic_guard import show
-        show()
-    else:
-        st.error("Page not found.")
+page = st.session_state.get("page", "dashboard")
+
+if page in PAGE_MAP:
+    try:
+        module = __import__(PAGE_MAP[page], fromlist=["show"])
+        module.show()
+    except Exception as e:
+        st.error(f"Error loading page '{page}': {e}")
+else:
+    st.error("Page not found.")

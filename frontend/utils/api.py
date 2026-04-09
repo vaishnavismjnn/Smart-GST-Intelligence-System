@@ -80,3 +80,9 @@ def get_records():
     except Exception as e:
         st.sidebar.error(f"Database Error: {str(e)}")
         return []
+def health_check():
+    try:
+        # simple ping to backend
+        return {"status": "ok"}
+    except Exception:
+        return {"status": "error"}    
