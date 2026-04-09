@@ -133,7 +133,8 @@ def show():
                     st.success("Processing complete ✅")
                     st.rerun()
                 else:
-                    st.error("Processing failed")
+                    st.error(f"Processing failed (Status {status})")
+                    st.write("Response:", data)
 
         st.markdown('</div>', unsafe_allow_html=True)
 
