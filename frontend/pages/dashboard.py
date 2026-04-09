@@ -20,78 +20,39 @@ CHART_CFG = {"displayModeBar": False, "responsive": True}
 # ------------------ HELPERS ------------------
 
 def _render_live_ticker(records):
-    records = records or []
+    """Scrolling ticker of recent invoice merchants."""
+    records= records or []
     processed = [r for r in records if r.get("MERCHANT") and r.get("status") == "processed"]
-
     if not processed:
         return
-
-    # Build ticker items
-    items = " &nbsp;&nbsp;•&nbsp;&nbsp; ".join(
-        f"<span style='color:#00D4AA;'>▸</span> {r['MERCHANT']} "
-        f"<span style='color:#F5C842;'>{fmt_inr(r.get('TOTAL_AMOUNT'))}</span>"
-        for r in processed[-10:]
+    items = " &nbsp;·&nbsp; ".join(
+        f'<span style="color:#00D4AA;">▸</span> {r["MERCHANT"]} '
+        f'<span style="color:#F5C842;">{fmt_inr(r.get("TOTAL_AMOUNT"))}</span>'
+        for r in processed[-8:]
     )
-
     st.markdown(f"""
-    <div style="
-        overflow:hidden;
-        background:linear-gradient(90deg, rgba(0,212,170,0.08), rgba(0,212,170,0.02));
-        border:1px solid rgba(0,212,170,0.15);
-        border-radius:12px;
-        padding:0.6rem 1rem;
-        margin-bottom:1.2rem;
-    ">
+    <div style="overflow:hidden; background:rgba(0,212,170,0.04);
+                border:1px solid rgba(0,212,170,0.1); border-radius:8px;
+                padding:0.45rem 1rem; margin-bottom:1.5rem;">
         <div style="display:flex; align-items:center; gap:1rem;">
-
-            <!-- LIVE INDICATOR -->
-            <div style="
-                display:flex;
-                align-items:center;
-                gap:6px;
-                white-space:nowrap;
-                font-size:0.7rem;
-                font-weight:700;
-                color:#00D4AA;
-                letter-spacing:0.1em;
-            ">
-                <span style="
-                    width:6px;
-                    height:6px;
-                    background:#00D4AA;
-                    border-radius:50%;
-                    animation:pulse 1.5s infinite;
-                "></span>
-                LIVE
-            </div>
-
-            <!-- SCROLLING WRAPPER -->
-            <div style="overflow:hidden; flex:1; position:relative;">
-                <div style="
-                    display:inline-block;
-                    white-space:nowrap;
-                    padding-left:100%;
-                    animation: scrollTicker 20s linear infinite;
-                    font-size:0.85rem;
-                    color:#A0AEC0;
-                ">
+            <span style="color:#00D4AA; font-size:0.65rem; font-weight:700;
+                         text-transform:uppercase; letter-spacing:0.1em;
+                         white-space:nowrap; flex-shrink:0;">
+                <span class="pulse-dot"></span>&nbsp; LIVE
+            </span>
+            <div style="overflow:hidden; flex:1;">
+                <div style="font-size:0.75rem; color:#A0AEC0;
+                            white-space:nowrap; font-family:'DM Mono',monospace;
+                            animation:ticker 18s linear infinite;">
                     {items}
                 </div>
             </div>
-
         </div>
     </div>
-
     <style>
-    @keyframes scrollTicker {{
-        0%   {{ transform: translateX(0%); }}
+    @keyframes ticker {{
+        0%   {{ transform: translateX(100%); }}
         100% {{ transform: translateX(-100%); }}
-    }}
-
-    @keyframes pulse {{
-        0%   {{ opacity: 1; }}
-        50%  {{ opacity: 0.3; }}
-        100% {{ opacity: 1; }}
     }}
     </style>
     """, unsafe_allow_html=True)
