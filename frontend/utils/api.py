@@ -77,7 +77,7 @@ def process_invoice(file_bytes, filename: str):
             f"{BASE_URL}/process",
             headers=_headers(),
             files={"file": (filename, file_bytes, "image/png")},
-            timeout=30
+            
         )
 
         _handle_401(r)
