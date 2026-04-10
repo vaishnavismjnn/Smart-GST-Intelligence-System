@@ -10,3 +10,4 @@ python-multipart
 pytesseract
 Pillow
 requests
+httpx
