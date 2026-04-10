@@ -5,3 +5,4 @@ plotly>=5.18.0
 pandas>=2.1.0
 python-dotenv
 openpyxl
+Pillow>=10.0.0

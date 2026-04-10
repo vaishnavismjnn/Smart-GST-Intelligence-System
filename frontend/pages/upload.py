@@ -6,6 +6,16 @@ from utils.auth import is_authenticated
 from components.cards import result_card
 from components.illustrations import upload_illustration, render_illustration
 
+# ✅ NEW IMPORTS (modular utils)
+from utils.invoice_utils import (
+    compress_image,
+    get_file_hash,
+    get_cached_result,
+    set_cached_result,
+    get_file_size_kb,
+    init_cache   # ✅ moved here (instead of inline import)
+)
+
 ALLOWED_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tiff"]
 
 PIPELINE = [
@@ -79,7 +89,11 @@ def show():
         )
 
         if uploaded_file:
-            st.session_state["uploaded_file"] = uploaded_file
+            # ❌ OLD (memory leak risk)
+            # st.session_state["uploaded_file"] = uploaded_file
+
+            # ✅ FIX: store only lightweight metadata
+            st.session_state["uploaded_file_name"] = uploaded_file.name
 
             st.markdown("<div style='margin-top:1.5rem;'></div>", unsafe_allow_html=True)
             st.markdown('<div class="section-title" style="font-size:0.7rem; opacity:0.7;">Pre-upload Preview</div>', unsafe_allow_html=True)
@@ -110,28 +124,86 @@ def show():
 
             if st.button("⚡ EXECUTE PIPELINE", use_container_width=True):
 
+                if not uploaded_file:
+                    st.error("Please upload a file first.")
+                    st.stop()
+
+                # ✅ SAFE CACHE INIT
+                init_cache(st.session_state)
+
+                # FILE HASH
+                try:
+                    file_hash = get_file_hash(uploaded_file)
+                except Exception as e:
+                    st.error(f"File error: {str(e)}")
+                    st.stop()
+
+                # CACHE CHECK
+                cached = get_cached_result(file_hash, st.session_state.cache)
+                if cached:
+                    st.success("⚡ Loaded instantly from cache")
+                    st.session_state["last_result"] = cached
+                    st.rerun()
+
+                # FILE SIZE GUARD
+                size_kb = get_file_size_kb(uploaded_file)
+                if size_kb > 5000:
+                    st.warning("File too large. Compressing may take longer...")
+
                 progress_placeholder = st.empty()
 
-                for i in range(len(PIPELINE)):
+                for i, step in enumerate(PIPELINE):
                     with progress_placeholder.container():
                         _step_indicator(i)
-                        st.info(PIPELINE[i][2])
-                    time.sleep(0.6)
+                        st.info(step[2])
 
-                with st.spinner("Processing invoice..."):
-                    try:
-                        status, data = process_invoice(
-                            uploaded_file.getvalue(),
-                            uploaded_file.name
+                # COMPRESSION
+                try:
+                    with st.spinner("📦 Optimizing image..."):
+                        compressed_image = compress_image(
+                            uploaded_file,
+                            max_size=(1024, 1024),
+                            quality=70,
+                            grayscale=False
                         )
-                    except Exception as e:
-                        st.error(f"API Error: {str(e)}")
-                        return
+                except Exception as e:
+                    st.error(f"Compression failed: {str(e)}")
+                    st.stop()
 
-                if status == 200:
+                # ✅ API CALL (SAFE RESPONSE HANDLING)
+                with st.spinner("Processing invoice..."):
+                    retries = 2
+                    response = None
+
+                    for attempt in range(retries):
+                        try:
+                            response = process_invoice(
+                                compressed_image.getvalue(),
+                                uploaded_file.name
+                            )
+                            break
+                        except Exception as e:
+                            if attempt == retries - 1:
+                                st.error(f"API Error: {str(e)}")
+                                st.stop()
+                            time.sleep(1)
+
+                    # ✅ CRITICAL FIX (prevents crash)
+                    if not isinstance(response, tuple) or len(response) != 2:
+                        st.error("Invalid API response")
+                        st.stop()
+
+                    status, data = response
+
+                # RESPONSE HANDLING
+                if status == 200 and data:
+
+                    set_cached_result(file_hash, data, st.session_state.cache)
+
                     st.session_state["last_result"] = data
                     st.success("Processing complete ✅")
                     st.rerun()
+
                 else:
                     st.error(f"Processing failed (Status {status})")
                     st.write("Response:", data)
@@ -141,7 +213,6 @@ def show():
     # ---------------- RIGHT PANEL ----------------
     with col_right:
         last = st.session_state.get("last_result")
-        uploaded_file = st.session_state.get("uploaded_file")
 
         if last is None:
             st.markdown("Waiting for upload...")
