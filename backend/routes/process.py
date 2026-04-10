@@ -4,8 +4,7 @@ from jose import jwt, JWTError
 from backend.core.security import SECRET_KEY, ALGORITHM
 from PIL import Image
 import io, base64, httpx, json, re, os, asyncio
-import uuid
-from datetime import datetime
+
 from backend.services.validation import validate_gst
 from backend.services.extract_invoice import extract_invoice_from_image
 from backend.services.upload_service import upload_to_cloudinary
@@ -229,24 +228,17 @@ async def process_invoice(
     # ─────────────────────────────────────────────────────────────
     # Upload
     # ─────────────────────────────────────────────────────────────
-    record_id = str(uuid.uuid4())
-    result = upload_to_cloudinary(
-    io.BytesIO(file_bytes),
-    public_id=record_id
-)
+
+    result = upload_to_cloudinary(io.BytesIO(file_bytes))
 
     doc = {
-    "record_id": record_id,
-    "filename": file.filename,
-    "cloudinary_url": result["url"],
-    "public_id": result["public_id"],
-    "status": "processed",
-    "user_email": user_email,
-    "timestamp": datetime.utcnow(),
-
-    # 🔥 keep extracted clean
-    "extracted": extracted
-}
+        "filename": file.filename,
+        "cloudinary_url": result["url"],
+        "public_id": result["public_id"],
+        "status": "processed",
+        "user_email": user_email,
+        **extracted,
+    }
 
     insert_result = collection.insert_one(doc)
 
