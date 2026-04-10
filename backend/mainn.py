@@ -2,7 +2,8 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routes.records import router as records_router
-
+import uuid
+from datetime import datetime, timezone
 from backend.routes.auth import router as auth_router
 from backend.routes.process import router as process_router
 from backend.services.upload_service import upload_to_cloudinary
@@ -29,23 +30,37 @@ app.add_middleware(
 def home():
     return {"message": "API is running 🚀"}
 
-# ── Legacy upload (no OCR) ────────────────────────────────────
+# ── Legacy upload  ────────────────────────────────────
+
+
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)):
-    result = upload_to_cloudinary(file.file)
+    record_id = str(uuid.uuid4())
+
+    result = upload_to_cloudinary(
+        file.file,
+        public_id=record_id
+    )
+
     data = {
+        "record_id": record_id,
         "filename":  file.filename,
         "url":       result["url"],
         "public_id": result["public_id"],
-        "status":    "uploaded"
-    }
-    collection.insert_one(data)
-    return {
-        "message":        "✅ Uploaded successfully",
-        "filename":       file.filename,
-        "cloudinary_url": result["url"]
+        "status":    "uploaded",
+        "timestamp": datetime.now(timezone.utc),
     }
 
+    collection.insert_one(data)
+
+    return {
+        "status": "success",
+        "data": {
+            "record_id": record_id,
+            "filename": file.filename,
+            "cloudinary_url": result["url"]
+        }
+    }
 # ── Custom OpenAPI (Bearer auth) ──────────────────────────────
 def custom_openapi():
     if app.openapi_schema:
