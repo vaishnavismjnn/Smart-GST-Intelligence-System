@@ -215,7 +215,25 @@ def show():
         last = st.session_state.get("last_result")
 
         if last is None:
-            st.markdown("Waiting for upload...")
+            # Right panel empty state — illustration imported at top of file,
+            # previously imported but never called (dead import fixed here).
+            st.markdown('<div class="glass-card" style="text-align:center; padding:3rem 1.5rem;">',
+                        unsafe_allow_html=True)
+            render_illustration(
+                upload_illustration(),
+                "Upload an invoice on the left to see extracted data here"
+            )
+            st.markdown("""
+            <div style="margin-top:1rem;">
+                <div style="color:#A0AEC0; font-size:0.82rem; font-weight:600;">
+                    Waiting for document…
+                </div>
+                <div style="color:#4A5568; font-size:0.75rem; margin-top:0.3rem;">
+                    Results will appear here after pipeline completes
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
         elif last:
             result_card(last)

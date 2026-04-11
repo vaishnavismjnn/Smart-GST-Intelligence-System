@@ -1,4 +1,9 @@
 # --- file: pages/dashboard.py ---
+# ═══════════════════════════════════════════════════════════════════════════
+# DASHBOARD PAGE
+# Overview analytics: KPI strip, live ticker, insight bar, 4 charts,
+# recent activity feed, financial summary with ITC progress.
+# ═══════════════════════════════════════════════════════════════════════════
 
 import streamlit as st
 from utils.api import get_records
@@ -11,17 +16,35 @@ from components.charts import (
     bar_amount_breakdown,
 )
 from utils.formatters import fmt_inr
+from utils.cleaner import clean_amount, deduplicate_records, get_valid_processed
+from utils.excel_builder import _build_excel   # ← wired in: dashboard Excel export
 from datetime import datetime
-import time
 
 CHART_CFG = {"displayModeBar": False, "responsive": True}
 
 
-# ------------------ HELPERS ------------------
+# ── _safe_records ─────────────────────────────────────────────────────────────
+# WHY: get_records() now always returns a list (api.py enforces this), but we
+# keep this normaliser as a belt-and-suspenders guard. Any page that calls
+# get_records() and passes the result here is guaranteed to get a clean list
+# of dicts regardless of what the API returned.
+def _safe_records(raw) -> list:
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        if "records" in raw and isinstance(raw["records"], list):
+            return [r for r in raw["records"] if isinstance(r, dict)]
+        return []
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    return []
 
-def _render_live_ticker(records):
-    """Scrolling ticker of recent invoice merchants."""
-    records= records or []
+
+# ── _render_live_ticker ───────────────────────────────────────────────────────
+# Shows the last 8 processed invoices scrolling horizontally.
+# Purely cosmetic — uses all processed records (not just valid) so the ticker
+# shows real activity, not a filtered subset.
+def _render_live_ticker(records: list) -> None:
     processed = [r for r in records if r.get("MERCHANT") and r.get("status") == "processed"]
     if not processed:
         return
@@ -57,130 +80,190 @@ def _render_live_ticker(records):
     </style>
     """, unsafe_allow_html=True)
 
-def _render_insight_bar(records):
+
+# ── _render_insight_bar ───────────────────────────────────────────────────────
+# Four quick-read stat chips below the KPI strip.
+#
+# ITC chip:
+#   Shows only the GST from fully valid invoices — the ITC-claimable amount.
+#   Uses get_valid_processed() so duplicates and invalid invoices are excluded.
+#
+# Compliance chip:
+#   valid_count / deduped_processed_count × 100
+#   Deduped denominator: we want "what % of unique invoices passed validation"
+#   not "what % of upload attempts passed". A duplicate upload should not
+#   lower the compliance rate.
+#
+# Avg chip:
+#   Average invoice value across all deduped processed invoices (including
+#   invalid ones — this is an operational average, not a financial one).
+def _render_insight_bar(records: list) -> None:
     records = records or []
-    processed = [r for r in records if r.get("status") == "processed"]
-    if not processed:
+
+    # Denominator: all processed invoices deduplicated
+    deduped_processed = deduplicate_records([
+        r for r in records
+        if isinstance(r, dict) and r.get("status") == "processed"
+    ])
+    if not deduped_processed:
         return
 
-    total_gst = sum(r.get("GST_AMOUNT", 0) or 0 for r in processed)
-    valid_pct = int(
-        sum(1 for r in processed if (r.get("validation") or {}).get("gst_valid")) 
-        / len(processed) * 100
-    ) if processed else 0
+    # ITC-eligible GST: only from fully valid invoices
+    valid = get_valid_processed(records)
+    itc_gst = sum(clean_amount(r.get("GST_AMOUNT")) for r in valid)
 
-    avg = sum(r.get("TOTAL_AMOUNT", 0) or 0 for r in processed) / len(processed)
+    # Operational average across all processed (not just valid)
+    total_amt = sum(clean_amount(r.get("TOTAL_AMOUNT")) for r in deduped_processed)
+    avg = total_amt / len(deduped_processed)
 
-    col1, col2, col3, col4 = st.columns(4)
+    # Compliance = valid / deduped_processed (both gst_valid AND amounts_match)
+    valid_pct = int(len(valid) / len(deduped_processed) * 100) if deduped_processed else 0
 
-    col1.metric("Total ITC", fmt_inr(total_gst))
-    col2.metric("GST Compliance", f"{valid_pct}%")
-    col3.metric("Avg Invoice", fmt_inr(avg))
-    col4.metric("Updated", datetime.now().strftime('%H:%M'))
+    cols = st.columns(4, gap="small")
+    for i, (icon, text) in enumerate([
+        ("🏛️", f"ITC: {fmt_inr(itc_gst)}"),
+        ("📈", f"Compliance: {valid_pct}%"),
+        ("💡", f"Avg: {fmt_inr(avg)}"),
+        ("📅", datetime.now().strftime("%d %b %H:%M")),
+    ]):
+        cols[i].markdown(
+            f"""<div style="padding:0.6rem;background:rgba(0,212,170,0.04);
+                border:1px solid rgba(0,212,170,0.1);border-radius:10px;">
+                {icon} {text}</div>""",
+            unsafe_allow_html=True,
+        )
 
 
-# ------------------ MAIN ------------------
-
-def show():
-
+# ── show ──────────────────────────────────────────────────────────────────────
+def show() -> None:
     if not is_authenticated():
         st.warning("Please log in.")
         return
 
-    user = st.session_state.get("user", "").split("@")[0].title()
+    user = st.session_state.get("user", "").split("@")[0].replace(".", " ").title()
 
-    st.title(f"Welcome back, {user} 👋")
+    st.markdown(f"""
+    <div class="page-header">
+        <div class="page-title">Welcome back, {user} 👋</div>
+        <div class="page-sub">
+            GST Intelligence Dashboard · {datetime.now().strftime("%A, %d %B %Y")}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ------------------ SAFE DATA FETCH ------------------
+    # ── Fetch ─────────────────────────────────────────────────────────────────
+    try:
+        raw = get_records()
+    except Exception:
+        raw = []
+    records = _safe_records(raw)
 
-    records = []
-
-    with st.spinner("Fetching records..."):
-        for _ in range(3):  # retry logic
-            try:
-                records = get_records()
-                if records:
-                    break
-            except Exception:
-                pass
-            time.sleep(2)
-
-    records = records or []
-
-    # ------------------ UI ------------------
-
+    # ── Top UI ────────────────────────────────────────────────────────────────
     _render_live_ticker(records)
-
     render_kpi_strip(records)
-
     _render_insight_bar(records)
 
-    # ------------------ CHARTS ------------------
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
-
+    # ── Charts ────────────────────────────────────────────────────────────────
+    # All four chart functions accept the raw records list and do their own
+    # filtering internally — they show trends across all data, not just valid.
+    col1, col2 = st.columns([2.2, 1])
     with col1:
-        fig_bar = bar_invoices_last30(records)
-        if fig_bar:
-            st.plotly_chart(fig_bar, use_container_width=True, config=CHART_CFG)
-
+        fig = bar_invoices_last30(records)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CFG)
     with col2:
-        fig_donut = donut_gst_validity(records)
-        if fig_donut:
-            st.plotly_chart(fig_donut, use_container_width=True, config=CHART_CFG)
+        fig = donut_gst_validity(records)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True, config=CHART_CFG)
 
-    fig_line = line_gst_trend(records)
-    if fig_line:
-        st.plotly_chart(fig_line, use_container_width=True, config=CHART_CFG)
+    fig = line_gst_trend(records)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True, config=CHART_CFG)
 
-    fig_stack = bar_amount_breakdown(records)
-    if fig_stack:
-        st.plotly_chart(fig_stack, use_container_width=True, config=CHART_CFG)
+    fig = bar_amount_breakdown(records)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True, config=CHART_CFG)
 
-    # ------------------ ACTIVITY ------------------
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
-    st.subheader("Recent Activity")
+    # ── Bottom Section ────────────────────────────────────────────────────────
+    col_activity, col_summary = st.columns([1.5, 1], gap="medium")
 
-    recent = [r for r in records if r.get("status") == "processed"][-5:][::-1]
+    # Activity feed: all deduped processed invoices (shows real pipeline activity)
+    processed_deduped = deduplicate_records([
+        r for r in records if r.get("status") == "processed"
+    ])
 
-    if not recent:
-        st.info("No recent activity")
-    else:
-        for rec in recent:
-            activity_item(rec)
+    # Financial summary: only fully valid, deduped invoices
+    valid = get_valid_processed(records)
 
-    # ------------------ SUMMARY ------------------
+    # ── Activity Feed ─────────────────────────────────────────────────────────
+    with col_activity:
+        st.markdown("### ⚡ Recent Activity")
+        recent = processed_deduped[-5:][::-1]
+        if not recent:
+            st.info("No activity yet")
+        else:
+            for r in recent:
+                activity_item(r)
 
-    st.subheader("Financial Summary")
+    # ── Financial Summary ──────────────────────────────────────────────────────
+    # FORMULAS:
+    #   Turnover  = Σ TOTAL_AMOUNT   for all valid invoices
+    #   Taxable   = Σ TAXABLE_AMOUNT for all valid invoices
+    #   GST total = Σ GST_AMOUNT     for all valid invoices
+    #   Avg       = Turnover / count(valid)
+    #
+    #   ITC = Σ GST_AMOUNT for valid invoices where GST_AMOUNT > 0
+    #     (valid already gates on gst_valid + amounts_match, so all ITC-eligible)
+    #
+    #   ITC % = ITC / GST_total × 100   (capped at 100 for display safety)
+    #     Interpretation: "What fraction of our total GST spend is recoverable
+    #     as Input Tax Credit?" Lower means more invoices failed validation.
+    with col_summary:
+        st.markdown("### 🏦 Financial Summary")
+        if valid:
+            total_turnover = sum(clean_amount(r.get("TOTAL_AMOUNT"))   for r in valid)
+            total_taxable  = sum(clean_amount(r.get("TAXABLE_AMOUNT")) for r in valid)
+            total_gst      = sum(clean_amount(r.get("GST_AMOUNT"))     for r in valid)
+            avg_invoice    = total_turnover / len(valid)
 
-    processed = [r for r in records if r.get("TOTAL_AMOUNT")]
+            st.write("Turnover:",    fmt_inr(total_turnover))
+            st.write("Avg Invoice:", fmt_inr(avg_invoice))
+            st.write("Taxable:",     fmt_inr(total_taxable))
+            st.write("GST:",         fmt_inr(total_gst))
 
-    if processed:
-        total_turnover = sum(r.get("TOTAL_AMOUNT", 0) or 0 for r in processed)
-        avg_invoice = total_turnover / len(processed)
-        total_taxable = sum(r.get("TAXABLE_AMOUNT", 0) or 0 for r in processed)
-        total_gst = sum(r.get("GST_AMOUNT", 0) or 0 for r in processed)
-
-        st.write("Total Turnover:", fmt_inr(total_turnover))
-        st.write("Avg Invoice:", fmt_inr(avg_invoice))
-        st.write("Total Taxable:", fmt_inr(total_taxable))
-        st.write("Total GST:", fmt_inr(total_gst))
-
-        # Excel export
-        try:
-            from utils.excel_builder import _build_excel
-
-            excel_bytes = _build_excel(records, title="GST Intelligence")
-
-            st.download_button(
-                "Download Excel",
-                excel_bytes,
-                file_name="gst_data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            itc = sum(
+                clean_amount(r.get("GST_AMOUNT"))
+                for r in valid
+                if clean_amount(r.get("GST_AMOUNT")) > 0
             )
+            pct = min(100, int((itc / total_gst) * 100)) if total_gst > 0 else 0
 
-        except Exception as e:
-            st.error(f"Excel export error: {e}")
+            st.metric("ITC Eligible GST", fmt_inr(itc))
+            st.progress(pct / 100)
 
-    else:
-        st.info("Upload invoices to see analytics")
+            # ── Excel Export ──────────────────────────────────────────────────
+            # Exports only the valid processed (ITC-eligible) invoices so the
+            # workbook contains the same set that the Financial Summary is built
+            # from — turnover, GST totals, and ITC figures all tie out exactly.
+            st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+            try:
+                excel_bytes = _build_excel(
+                    valid,
+                    title="GST Intelligence — Dashboard Financial Summary"
+                )
+                st.download_button(
+                    label="📊 Export Valid Invoices to Excel",
+                    data=excel_bytes,
+                    file_name="gst_dashboard_export.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="dashboard_excel_export",
+                )
+            except Exception as e:
+                st.error(f"Excel export error: {e}")
+        else:
+            st.info("Upload invoices to see financial summary")

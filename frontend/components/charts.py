@@ -2,6 +2,29 @@
 import plotly.graph_objects as go
 from collections import Counter
 from datetime import datetime, timedelta
+from utils.formatters import short_id  # single source of truth — avoids duplication
+
+
+def _safe_num(v) -> float:
+    """
+    Safe numeric parse for chart data — handles OCR strings like '1,800',
+    None, empty string, and garbage without crashing.
+    Intentionally inlined here to keep charts.py self-contained
+    (avoids circular import through utils.cleaner → pandas at import time).
+    """
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        cleaned = v.replace(",", "").strip()
+        if not cleaned:
+            return 0.0
+        try:
+            return float(cleaned)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 P = {
     "bg":     "#060D1F",
@@ -125,13 +148,13 @@ def line_gst_trend(records: list):
     dated = []
     for r in records:
         raw = r.get("INVOICE_DATE") or r.get("date")
-        amt = r.get("GST_AMOUNT") or 0
+        amt = _safe_num(r.get("GST_AMOUNT"))   # FIX: was float(r.get(...) or 0) — crashes on '1,800'
         if not raw:
             continue
         for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
             try:
                 d = datetime.strptime(str(raw), fmt).date()
-                dated.append((d, float(amt)))
+                dated.append((d, amt))
                 break
             except ValueError:
                 continue
@@ -187,9 +210,10 @@ def bar_amount_breakdown(records: list):
     if not recent:
         return None
 
-    labels   = [r.get("MERCHANT", short_id(r.get("_id","")))[:12] for r in recent]
-    taxable  = [r.get("TAXABLE_AMOUNT") or 0 for r in recent]
-    gst_amt  = [r.get("GST_AMOUNT") or 0 for r in recent]
+    labels  = [r.get("MERCHANT", short_id(r.get("_id", "")))[:12] for r in recent]
+    # FIX: was r.get("TAXABLE_AMOUNT") or 0 — passes OCR strings straight to Plotly
+    taxable = [_safe_num(r.get("TAXABLE_AMOUNT")) for r in recent]
+    gst_amt = [_safe_num(r.get("GST_AMOUNT"))     for r in recent]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -221,6 +245,4 @@ def bar_amount_breakdown(records: list):
     )
     return fig
 
-# helper used in cards
-def short_id(record_id: str) -> str:
-    return f"#{record_id[-6:].upper()}" if record_id else "—"
+# short_id is imported from utils.formatters above — single definition, no duplication.
