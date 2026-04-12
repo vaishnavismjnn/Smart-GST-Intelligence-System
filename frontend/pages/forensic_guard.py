@@ -1,73 +1,33 @@
 # --- file: pages/forensic_guard.py ---
-# ═══════════════════════════════════════════════════════════════════════════
-# FORENSIC GUARD PAGE
-# Duplicate invoice detection, amount integrity checking, GSTIN format
-# validation, and MD5 fingerprint analysis.
-# ═══════════════════════════════════════════════════════════════════════════
+# Feature: Forensic Duplicate & Integrity Guard
+# CSS classes: .glass-card, .section-title, .forensic-row-invalid,
+#              .duplicate-modal, .fp-chip, .badge-valid, .badge-invalid
+# All in styles.py — no new style blocks here.
 
 import streamlit as st
-import hashlib
-import re
 from utils.api import get_records
 from utils.auth import is_authenticated
 from utils.formatters import fmt_inr, fmt_bool_badge, short_id
-from utils.cleaner import clean_amount, deduplicate_records
 
-
-# ── GSTIN Regex ───────────────────────────────────────────────────────────────
-# Indian GSTIN format: 15 characters
-#   Positions 1-2  : State code (01-37), numeric
-#   Positions 3-7  : First 5 letters of PAN, uppercase alpha
-#   Positions 8-11 : 4 digits of PAN
-#   Position 12    : PAN entity type (alpha)
-#   Position 13    : Registration count for that PAN (alphanumeric)
-#   Position 14    : Always "Z" (reserved)
-#   Position 15    : Check digit (alphanumeric)
-# Example: 27AAPFU0939F1ZV
-_GSTIN_REGEX = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]$")
-
-
-# ── _fingerprint ─────────────────────────────────────────────────────────────
-# WHY MD5:
-#   We don't use MD5 for security here — we use it to produce a fixed-length
-#   hex string from four invoice fields. MD5 is deterministic: the same input
-#   always produces the same output. Two invoices with the same fingerprint
-#   are definitionally the same transaction.
-#
-# WHY THESE FOUR FIELDS:
-#   MERCHANT     — who issued it
-#   TOTAL_AMOUNT — the final billed amount (normalised to float via clean_amount
-#                  so "1,23,000" and 123000.0 produce the same fingerprint)
-#   GSTIN        — supplier's tax ID (two merchants can have the same name
-#                  but different GSTINs — we need GSTIN to disambiguate)
-#   INVOICE_DATE — when it was issued
-#
-# CRITICAL: TOTAL_AMOUNT must be normalised before hashing.
-#   If the same invoice is uploaded twice — once from OCR (amount as string
-#   "1,23,000") and once from a DB-normalised record (amount as float 123000.0)
-#   — without normalisation they would produce different fingerprints and the
-#   duplicate would go undetected. clean_amount() converts both to 123000.0,
-#   then we format to 2 decimal places for a consistent string representation.
+# ── Helper: Fingerprint generation ────────────────────────────
 def _fingerprint(record: dict) -> str:
     """
-    MD5 hash of: MERCHANT | TOTAL_AMOUNT_normalised | GSTIN | INVOICE_DATE.
-    Amount is normalised through clean_amount() so OCR strings and floats
-    produce the same hash for the same physical invoice.
+    Generate a fingerprint ID from MERCHANT + TOTAL_AMOUNT + INVOICE_DATE.
+    This uniquely identifies an invoice's content — two invoices with the
+    same merchant, amount, and date are considered duplicates.
+    Plain English: Think of it like a receipt's 'DNA' — if two receipts
+    have the same shop, price, and date, they're the same receipt submitted twice.
     """
-    amt_str = f"{clean_amount(record.get('TOTAL_AMOUNT', 0)):.2f}"
-    raw = (
-        f"{record.get('MERCHANT', '')}|"
-        f"{amt_str}|"
-        f"{record.get('GSTIN', '')}|"
-        f"{record.get('INVOICE_DATE', '')}"
-    )
-    return hashlib.md5(raw.encode()).hexdigest()
+    merchant = str(record.get("MERCHANT", "")).strip().lower()
+    amount   = str(record.get("TOTAL_AMOUNT", "")).strip()
+    date_str = str(record.get("INVOICE_DATE", "")).strip()
+    return f"{merchant}|{amount}|{date_str}"
 
-
-# ── _detect_duplicates ────────────────────────────────────────────────────────
-# Returns {fingerprint: [list of _id strings]} for all records.
-# Any entry with len > 1 is a duplicate group.
 def _detect_duplicates(records: list) -> dict:
+    """
+    Returns a dict mapping fingerprint → list of record _ids that share it.
+    Any fingerprint with >1 entry is a duplicate group.
+    """
     seen: dict = {}
     for r in records:
         fp  = _fingerprint(r)
@@ -75,69 +35,24 @@ def _detect_duplicates(records: list) -> dict:
         seen.setdefault(fp, []).append(rid)
     return seen
 
-
-# ── _integrity_issues ─────────────────────────────────────────────────────────
-# WHY INDEPENDENT MATH CHECK (not just backend amounts_match flag):
-#   The backend sets amounts_match during OCR processing. But:
-#   (a) The backend may have a bug or use a different tolerance.
-#   (b) A user could manually edit a MongoDB record to set amounts_match=True
-#       even when the math is wrong.
-#   (c) We want forensic independence — the guard should catch issues that
-#       the backend missed.
-#
-# FORMULA: abs((TAXABLE_AMOUNT + GST_AMOUNT) - TOTAL_AMOUNT) >= ₹2
-#   GST law: TOTAL = TAXABLE + GST (+ cess if applicable).
-#   We use ₹2 tolerance to allow for rounding differences in OCR.
-#   Stricter than ₹0 (which would flag legitimate rounding) but tight enough
-#   to catch genuine OCR errors.
-#
-# GUARD: only flag if ALL THREE values are non-zero. If any is missing/zero,
-#   we cannot perform the check — we do NOT flag as an error.
 def _integrity_issues(records: list) -> list:
-    """
-    Return records where abs((TAXABLE + GST) - TOTAL) >= ₹2.
-    Uses clean_amount() so OCR string amounts don't crash the arithmetic.
-    Only flags when all three amounts are present and non-zero.
-    """
-    issues = []
-    for r in records:
-        t = clean_amount(r.get("TOTAL_AMOUNT"))
-        x = clean_amount(r.get("TAXABLE_AMOUNT"))
-        g = clean_amount(r.get("GST_AMOUNT"))
-        if t > 0 and x > 0 and g > 0:
-            if abs((x + g) - t) >= 2.0:
-                issues.append(r)
-    return issues
+    """Return records where amounts_match is False (financial inconsistency)."""
+    return [r for r in records
+            if r.get("validation", {}).get("amounts_match") is False]
 
-
-# ── _gstin_format_issues ──────────────────────────────────────────────────────
-# Client-side GSTIN format validation using the official Indian GSTIN regex.
-# Complements the backend validation — provides a second independent check.
-# Empty/null GSTINs are treated separately (OCR failure, not format error).
-def _gstin_format_issues(records: list) -> list:
-    issues = []
-    for r in records:
-        gstin = str(r.get("GSTIN") or "").strip()
-        if gstin and gstin != "—" and not _GSTIN_REGEX.match(gstin):
-            issues.append(r)
-    return issues
-
-
-# ── _validation_bar ───────────────────────────────────────────────────────────
-# Grouped bar chart: Valid vs Invalid counts for GSTIN and Amount checks.
-# Shows the overall health of the invoice dataset at a glance.
+# ── Chart: Validation status breakdown ─────────────────────────
 def _validation_bar(records: list):
     import plotly.graph_objects as go
-    valid_gst   = sum(1 for r in records if (r.get("validation") or {}).get("gst_valid")    is True)
-    match_ok    = sum(1 for r in records if (r.get("validation") or {}).get("amounts_match") is True)
+    valid_gst   = sum(1 for r in records if r.get("validation", {}).get("gst_valid") is True)
     invalid_gst = len(records) - valid_gst
+    match_ok    = sum(1 for r in records if r.get("validation", {}).get("amounts_match") is True)
     match_fail  = len(records) - match_ok
 
     fig = go.Figure(data=[
         go.Bar(name="Valid",   x=["GSTIN", "Amounts"], y=[valid_gst, match_ok],
-               marker_color="#00A896", marker_cornerradius=4),
+               marker_color="#00A896"),
         go.Bar(name="Invalid", x=["GSTIN", "Amounts"], y=[invalid_gst, match_fail],
-               marker_color="#D63E58", marker_cornerradius=4),
+               marker_color="#D63E58"),
     ])
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
@@ -156,9 +71,7 @@ def _validation_bar(records: list):
     )
     return fig
 
-
-# ── show ──────────────────────────────────────────────────────────────────────
-def show() -> None:
+def show():
     if not is_authenticated():
         st.warning("Please log in.")
         return
@@ -179,18 +92,11 @@ def show() -> None:
         st.info("No records found. Upload invoices to enable forensic analysis.")
         return
 
-    # Deduplicate before forensic analysis so duplicate-group detection works
-    # correctly and KPI counts match what the dashboard/records pages report.
-    # Note: _detect_duplicates still uses the RAW list so it can flag which
-    # records ARE duplicates — dedup here just prevents double-counting in KPIs.
-    records_deduped = deduplicate_records(records)
+    fp_map   = _detect_duplicates(records)
+    issues   = _integrity_issues(records)
 
-    fp_map       = _detect_duplicates(records)          # raw — finds all dup pairs
-    issues       = _integrity_issues(records_deduped)   # deduped — no double-counts
-    gstin_issues = _gstin_format_issues(records_deduped)
-    dup_groups   = {fp: ids for fp, ids in fp_map.items() if len(ids) > 1}
-
-    # ── Alert Banners ─────────────────────────────────────────────────────────
+    # ── Alert banners ──────────────────────────────────────
+    dup_groups = {fp: ids for fp, ids in fp_map.items() if len(ids) > 1}
     if dup_groups:
         total_dups = sum(len(v) - 1 for v in dup_groups.values())
         st.markdown(f"""
@@ -207,7 +113,8 @@ def show() -> None:
                     </div>
                 </div>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
     if issues:
         st.markdown(f"""
@@ -221,38 +128,20 @@ def show() -> None:
                     {len(issues)} Amount Mismatch(es) Found
                 </div>
                 <div style="color:var(--text2); font-size:0.75rem; margin-top:2px;">
-                    abs(TAXABLE + GST − TOTAL) ≥ ₹2 tolerance — likely OCR error.
+                    These invoices have GST amounts that don't reconcile with taxable + GST = total.
                 </div>
             </div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
-    if gstin_issues:
-        st.markdown(f"""
-        <div style="background:rgba(255,77,109,0.06); border:1px solid rgba(255,77,109,0.25);
-                    border-left:4px solid #FF4D6D; border-radius:12px;
-                    padding:0.85rem 1.25rem; margin-bottom:1rem;
-                    display:flex; align-items:center; gap:0.75rem;">
-            <span style="font-size:1.3rem;">🚫</span>
-            <div>
-                <div style="font-weight:700; color:#FF4D6D; font-size:0.88rem;">
-                    {len(gstin_issues)} Invalid GSTIN Format(s)
-                </div>
-                <div style="color:var(--text2); font-size:0.75rem; margin-top:2px;">
-                    GSTIN does not match \\d{{2}}[A-Z]{{5}}\\d{{4}}[A-Z][A-Z0-9]Z[A-Z0-9].
-                    Cannot be used for ITC claims.
-                </div>
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    # ── KPI Strip ─────────────────────────────────────────────────────────────
-    clean_count = max(0, len(records_deduped) - len(issues) - sum(len(v) - 1 for v in dup_groups.values()))
-    cols = st.columns(5, gap="small")
+    # ── Summary KPIs ───────────────────────────────────────
+    cols = st.columns(4, gap="small")
     for col, (label, val, icon, color) in zip(cols, [
-        ("Total Records",    str(len(records_deduped)), "📦", "#00A896"),
-        ("Duplicate Groups", str(len(dup_groups)),      "🔁", "#D63E58" if dup_groups else "#00A896"),
-        ("Integrity Issues", str(len(issues)),          "⚠️", "#C8860A" if issues     else "#00A896"),
-        ("GSTIN Format Err", str(len(gstin_issues)),    "🚫", "#FF4D6D" if gstin_issues else "#00A896"),
-        ("Clean Records",    str(clean_count),          "✅", "#00A896"),
+        ("Total Records",   str(len(records)),          "📦", "#00A896"),
+        ("Duplicate Groups",str(len(dup_groups)),        "🔁", "#D63E58" if dup_groups else "#00A896"),
+        ("Integrity Issues",str(len(issues)),            "⚠️", "#C8860A" if issues else "#00A896"),
+        ("Clean Records",   str(max(0, len(records) - len(set(r.get("_id") for r in issues)) - sum(len(v)-1 for v in dup_groups.values()))),
+                                                         "✅", "#00A896"),
     ]):
         col.markdown(f"""
         <div style="background:var(--card); border:1px solid var(--card-border);
@@ -266,16 +155,17 @@ def show() -> None:
                         letter-spacing:0.08em; margin-bottom:0.2rem;">{label}</div>
             <div style="color:{color}; font-weight:700; font-size:1.2rem;
                         font-family:'DM Mono',monospace;">{val}</div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
-    # ── Chart + Fingerprint Legend ────────────────────────────────────────────
+    # ── Chart + Fingerprint Legend ─────────────────────────
     col_chart, col_fp = st.columns([1.4, 1], gap="large")
 
     with col_chart:
         st.markdown('<div class="glass-card" style="padding:1.25rem 1.5rem;">', unsafe_allow_html=True)
-        st.plotly_chart(_validation_bar(records_deduped), use_container_width=True,
+        st.plotly_chart(_validation_bar(records), use_container_width=True,
                         config={"displayModeBar": False})
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -285,15 +175,15 @@ def show() -> None:
                     unsafe_allow_html=True)
         st.markdown("""
         <div style="color:var(--text2); font-size:0.8rem; line-height:1.6; margin-bottom:1rem;">
-            Each invoice gets a unique <b>MD5 fingerprint</b> from four fields.
-            Amounts are normalised before hashing so OCR strings and DB floats
-            produce the same hash for the same physical invoice.
-        </div>""", unsafe_allow_html=True)
+            Each invoice gets a unique <b>fingerprint</b> derived from three fields.
+            If two invoices share the same fingerprint, they are flagged as duplicates.
+        </div>
+        """, unsafe_allow_html=True)
+
         for icon, field, desc in [
-            ("🏢", "MERCHANT",     "Who issued the invoice"),
-            ("💵", "TOTAL_AMOUNT", "Normalised to float (₹ stripped, commas removed)"),
-            ("🔢", "GSTIN",        "Supplier tax ID"),
-            ("📅", "INVOICE_DATE", "When it was issued"),
+            ("🏢", "MERCHANT",      "Who issued the invoice"),
+            ("💵", "TOTAL_AMOUNT",  "The final billed amount"),
+            ("📅", "INVOICE_DATE",  "When it was issued"),
         ]:
             st.markdown(f"""
             <div style="display:flex; align-items:center; gap:0.75rem;
@@ -304,22 +194,26 @@ def show() -> None:
                                 color:var(--accent); font-weight:600;">{field}</div>
                     <div style="font-size:0.7rem; color:var(--muted);">{desc}</div>
                 </div>
-            </div>""", unsafe_allow_html=True)
+            </div>
+            """, unsafe_allow_html=True)
+
         st.markdown("""
         <div style="margin-top:1rem; padding:0.75rem; background:rgba(0,168,150,0.06);
                     border:1px solid rgba(0,168,150,0.15); border-radius:10px;">
             <div style="font-size:0.68rem; color:var(--muted); margin-bottom:0.3rem;">
-                Algorithm: MD5(MERCHANT | norm(AMOUNT) | GSTIN | DATE)
+                Example fingerprint:
             </div>
-            <span class="fp-chip">a3f8c2...d91e</span>
-        </div></div>""", unsafe_allow_html=True)
+            <span class="fp-chip">cloudprint media|12490.35|11-09-2023</span>
+        </div>
+        </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
-    # ── Forensic Table ────────────────────────────────────────────────────────
+    # ── Forensic Table ─────────────────────────────────────
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">🔬 Forensic Invoice Table</div>', unsafe_allow_html=True)
 
+    # Search
     search = st.text_input("Filter by Merchant / GSTIN", placeholder="Search...",
                            key="forensic_search", label_visibility="collapsed")
 
@@ -329,69 +223,67 @@ def show() -> None:
         <div>ID</div><div>Merchant</div><div>GSTIN</div><div>Date</div>
         <div>Total</div><div>GSTIN ✓</div><div>Amt ✓</div>
         <div>Fingerprint</div><div>Status</div>
-    </div>""", unsafe_allow_html=True)
-
-    gstin_issue_ids = {r.get("_id") for r in gstin_issues}
+    </div>
+    """, unsafe_allow_html=True)
 
     shown = 0
-    for r in records_deduped:
+    for r in records:
         merchant = r.get("MERCHANT", "—")
         gstin    = r.get("GSTIN", "—")
+
         if search and search.lower() not in merchant.lower() and search.lower() not in gstin.lower():
             continue
 
         shown += 1
-        v       = r.get("validation", {}) or {}
-        rid     = short_id(r.get("_id", ""))
-        fp      = _fingerprint(r)
-        is_dup  = len(fp_map.get(fp, [])) > 1
+        v      = r.get("validation", {}) or {}
+        rid    = short_id(r.get("_id", ""))
+        fp     = _fingerprint(r)
+        is_dup = len(fp_map.get(fp, [])) > 1
+        bad_amt = v.get("amounts_match") is False
         gst_ok  = v.get("gst_valid", False)
-        fmt_bad = r.get("_id") in gstin_issue_ids
 
-        # Independent math check using clean_amount — safe on string amounts
-        t = clean_amount(r.get("TOTAL_AMOUNT"))
-        x = clean_amount(r.get("TAXABLE_AMOUNT"))
-        g = clean_amount(r.get("GST_AMOUNT"))
-        bad_amt = (t > 0 and x > 0 and g > 0 and abs((x + g) - t) >= 2.0)
-
-        gb = fmt_bool_badge(gst_ok,   "✓", "✗")
+        gb = fmt_bool_badge(gst_ok, "✓", "✗")
         ab = fmt_bool_badge(not bad_amt, "✓", "✗")
 
-        # FIX: was `"" if not bad_amt else ""` — both branches were identical empty strings.
-        # Amount-mismatch rows now get a subtle gold tint so they stand out visually.
-        row_bg = "rgba(212,160,23,0.06)" if bad_amt else ""
+        # Row background: pulse-red if amounts don't match
+        row_extra = 'class="forensic-row-invalid"' if bad_amt else ""
+        row_bg    = "rgba(255,255,255,0.05)" if not bad_amt else ""
+
+        status_html = ""
         if is_dup:
             status_html = '<span class="badge-invalid">Duplicate</span>'
         elif bad_amt:
             status_html = '<span class="badge-warn">Mismatch</span>'
-        elif fmt_bad:
-            status_html = '<span class="badge-invalid">Bad GSTIN</span>'
         elif not gst_ok:
             status_html = '<span class="badge-invalid">Invalid GST</span>'
         else:
             status_html = '<span class="badge-valid">Clean</span>'
 
-        fp_short = fp[:14] + "…"
+        fp_short = fp[:22] + "…" if len(fp) > 22 else fp
 
         st.markdown(f"""
-        <div class="tbl-row" style="grid-template-columns:{COLS}; background:{row_bg};"
+        <div {row_extra} class="tbl-row"
+             style="grid-template-columns:{COLS}; background:{row_bg};"
              onmouseover="this.style.background='rgba(0,168,150,0.05)'"
              onmouseout="this.style.background='{row_bg}'">
-            <div style="color:var(--muted); font-family:'DM Mono',monospace; font-size:0.7rem;">{rid}</div>
+            <div style="color:var(--muted); font-family:'DM Mono',monospace;
+                        font-size:0.7rem;">{rid}</div>
             <div style="color:var(--text); font-weight:600; font-size:0.82rem;">{merchant}</div>
             <div style="color:var(--text2); font-size:0.68rem; font-family:'DM Mono',monospace;">{gstin}</div>
-            <div style="color:var(--text2); font-size:0.75rem;">{r.get("INVOICE_DATE", "—")}</div>
+            <div style="color:var(--text2); font-size:0.75rem;">{r.get('INVOICE_DATE','—')}</div>
             <div style="color:var(--accent); font-weight:700; font-size:0.82rem;
-                        font-family:'DM Mono',monospace;">{fmt_inr(clean_amount(r.get("TOTAL_AMOUNT")))}</div>
+                        font-family:'DM Mono',monospace;">{fmt_inr(r.get('TOTAL_AMOUNT'))}</div>
             <div>{gb}</div>
             <div>{ab}</div>
             <div style="font-family:'DM Mono',monospace; font-size:0.62rem;
                         color:var(--muted);" title="{fp}">{fp_short}</div>
             <div>{status_html}</div>
-        </div>""", unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
+        # Duplicate detail expander
         if is_dup:
-            dup_ids = [i for i in fp_map[fp] if i != r.get("_id", "")]
+            dup_ids = [i for i in fp_map[fp] if i != r.get("_id","")]
             with st.expander(f"  ⚠️ Duplicate detail — {merchant} {rid}"):
                 st.markdown(f"""
                 <div class="duplicate-modal">
@@ -399,23 +291,24 @@ def show() -> None:
                         Duplicate Invoice Detected
                     </div>
                     <div style="color:var(--text2); font-size:0.82rem; margin-bottom:0.75rem;">
-                        This record matches:
+                        This record matches the following Record ID(s):
                     </div>
-                    {"".join(f'<span class="fp-chip" style="margin:2px;">#{i[-6:].upper()}</span>' for i in dup_ids)}
+                    {''.join(f'<span class="fp-chip" style="margin:2px;">#{i[-6:].upper()}</span>' for i in dup_ids)}
                     <div style="margin-top:0.75rem; color:var(--muted); font-size:0.72rem;">
-                        MD5 Fingerprint: <span class="fp-chip">{fp}</span>
+                        Fingerprint: <span class="fp-chip">{fp}</span>
                     </div>
-                </div>""", unsafe_allow_html=True)
+                </div>
+                """, unsafe_allow_html=True)
 
     if shown == 0:
         st.markdown("""
         <div style="text-align:center; padding:2rem; color:var(--muted);">
-            No records match your search.
-        </div>""", unsafe_allow_html=True)
+            <div>No records match your search.</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div style="text-align:center; color:var(--muted); font-size:0.72rem; margin-top:0.75rem;">
-        {shown} records · {len(dup_groups)} dup group(s) ·
-        {len(issues)} integrity issue(s) · {len(gstin_issues)} GSTIN format error(s)
-        · {len(records) - len(records_deduped)} duplicate(s) excluded
-    </div></div>""", unsafe_allow_html=True)
+        {shown} records displayed · {len(dup_groups)} duplicate group(s) · {len(issues)} integrity issue(s)
+    </div>
+    </div>""", unsafe_allow_html=True)
