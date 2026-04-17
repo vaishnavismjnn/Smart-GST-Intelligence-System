@@ -72,6 +72,6 @@ Database: MongoDB
 
 
 ## SYSTEM ARCHITECTURE
-<img width="500" src="https://github.com/user-attachments/assets/bda28873-79ef-4693-90ad-7dd28118c4c1" />
+<img width="500" src="https://github.com/user-attachments/assets/bda28873-79ef-4693-90ad-7dd28118c4c1" /><br>
 
 <img width="400" src="https://github.com/user-attachments/assets/fb239aae-6d4d-4d7a-93b7-6176403afd53" />
