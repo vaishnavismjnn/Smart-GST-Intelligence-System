@@ -73,4 +73,7 @@ Database: MongoDB
 
 ## SYSTEM ARCHITECTURE
 <img width="500" alt="WhatsApp Image 2026-04-17 at 3 10 53 PM" src="https://github.com/user-attachments/assets/bda28873-79ef-4693-90ad-7dd28118c4c1" />
+
+
+
 <img width="400" alt="ChatGPT Image Apr 17, 2026, 02_53_26 PM" src="https://github.com/user-attachments/assets/fb239aae-6d4d-4d7a-93b7-6176403afd53" />
